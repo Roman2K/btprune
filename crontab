@@ -1,0 +1,1 @@
+0 4,10,16,22 * * * cd code/qbtprune && ./cronjob
