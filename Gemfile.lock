@@ -12,7 +12,7 @@ GIT
 
 GIT
   remote: git://github.com/Roman2K/qbittorrent-ruby.git
-  revision: d0a9cb9742475de604981e99fb5c58f5974ee7d8
+  revision: 32f60a00bb4c79d97ddb40d7e6cb874bc60398d4
   specs:
     qbittorrent-ruby (0.1.0)
 

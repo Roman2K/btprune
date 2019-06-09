@@ -16,24 +16,22 @@ class App
       exit 0
     end
 
-    torrents = qbt.completed
     done = {"radarr" => radarr, "sonarr" => sonarr}.tap do |h|
       h.each do |cat, url|
         h[cat] = (send "#{cat}_done", URI(url) if url)
       end
     end
 
-    torrents.each do |t|
+    qbt.completed.each do |t|
       auto_delete qbt, t, done
     end
   end
 
-  MIN_RATIO = 10
+  DEFAULT_MIN_RATIO = 10
 
   private def auto_delete(qbt, t, done)
-    name = t.fetch "name"
     cat = t.fetch "category"
-    log = @log["in %s" % cat, torrent: name]
+    log = @log["in %s" % cat, torrent: t.fetch("name")]
     cat_done = done.fetch cat do
       log.error "unknown category"
       return
@@ -50,12 +48,29 @@ class App
     end
 
     progress = t.fetch "progress"
+    if progress < 1
+      log.debug "still downloading"
+      return
+    end
+
     ratio = t.fetch "ratio"
-    log = log[
-      progress: ("%.1f%%" % [progress*100]).sub(/\.0%$/, "%"),
-      ratio: ("%.1f" % ratio).sub(/\.0$/, ""),
-    ]
-    if progress < 1 || ratio < MIN_RATIO
+    min_ratio = t.fetch("max_ratio").
+      yield_self { |r| r > 0 ? r : DEFAULT_MIN_RATIO }
+    time_limit = t.fetch("seeding_time_limit").
+      yield_self { |mins| mins * 60 if mins > 0 }
+    seed_time = (Time.now - Time.at(t.fetch "completion_on") if progress >= 1)
+    seeding_done = ratio >= min_ratio \
+      || (time_limit && seed_time && seed_time >= time_limit)
+
+    log = log[{
+      progress: Fmt.progress(progress),
+      ratio: Fmt.ratio(ratio),
+      min_ratio: Fmt.ratio(min_ratio),
+      seed_time: (Fmt.duration seed_time if seed_time),
+      time_limit: (Fmt.duration time_limit if time_limit),
+    }.reject { |k,v| v.nil? }]
+
+    if !seeding_done
       log.debug "still seeding"
       return
     end
@@ -166,6 +181,25 @@ end
 class Sonarr < PVR
   def queue
     JSON.parse get_response!(add_uri "/queue").body
+  end
+end
+
+module Fmt
+  def self.duration(d)
+    case
+    when d < 60 then "%ds" % d
+    when d < 3600 then m, d = d.divmod(60); "%dm%s" % [m, duration(d)]
+    when d < 86400 then h, d = d.divmod(3600); "%dh%s" % [h, duration(d)]
+    else ds, d = d.divmod(86400); "%dd%s" % [ds, duration(d)]
+    end.sub /([a-z])(0[a-z])+$/, '\1'
+  end
+  
+  def self.ratio(r)
+    ("%.1f" % r).sub /\.0$/, ""
+  end
+
+  def self.progress(f)
+    ("%.1f%%" % [f*100]).sub /\.0%$/, "%"
   end
 end
 
