@@ -1,20 +1,18 @@
 require 'qbittorrent'
 require 'log'
 
-$log = Log.new $stderr, level: :info
-
-module Commands
-  extend self
-
-  MIN_RATIO = 10
+class App
+  def initialize(log)
+    @log = log
+  end
 
   def cmd_prune(qbt, radarr: nil, sonarr: nil)
     qbt = begin
       Timeout.timeout 2 do
-        QBitTorrent.new URI(qbt), log: $log
+        QBitTorrent.new URI(qbt), log: @log["qbt"]
       end
     rescue Timeout::Error
-      $log.warn "qBitTorrent HTTP API seems unavailable, aborting"
+      @log.warn "qBitTorrent HTTP API seems unavailable, aborting"
       exit 0
     end
 
@@ -30,17 +28,19 @@ module Commands
     end
   end
 
+  MIN_RATIO = 10
+
   private def auto_delete(qbt, t, done)
     name = t.fetch "name"
     cat = t.fetch "category"
-    log = $log["in %s" % cat, torrent: name]
+    log = @log["in %s" % cat, torrent: name]
     cat_done = done.fetch cat do
       log.error "unknown category"
       return
     end
     cat_done or return
 
-    ok = cat_done.fetch(t.fetch "hash") do
+    ok = cat_done.fetch t.fetch("hash").downcase do
       log.warn "not found in PVR"
       return
     end
@@ -65,7 +65,7 @@ module Commands
   end
 
   private def radarr_done(uri)
-    history_done Radarr.new(uri).history do |ev|
+    history_done Radarr.new(uri, @log["radarr"]).history do |ev|
       ev.fetch("movie").fetch "hasFile"
     end
   end
@@ -77,14 +77,14 @@ module Commands
       each { |ev|
         hash = (cl = ev.fetch("data")["downloadClient"] \
           and cl.downcase == "qbittorrent" \
-          and ev["downloadId"]) or next
+          and ev.fetch "downloadId") or next
         done[hash.downcase] = yield ev
       }
     done
   end
 
   private def sonarr_done(uri)
-    sonarr = Sonarr.new uri
+    sonarr = Sonarr.new uri, @log["sonarr"]
 
     done = history_done sonarr.history do |ev|
       ev.fetch("episode").fetch "hasFile"
@@ -93,13 +93,13 @@ module Commands
     mismatch = {}
     sonarr.queue.each do |entry|
       entry.fetch("protocol") == "torrent" or next
-      name = entry.fetch "title"
+      log = @log[torrent: entry.fetch("title")]
       hash = entry.fetch("downloadId").downcase
       ok = entry.fetch("episode").fetch("hasFile")
       val = done[hash]
       if !val.nil? && ok != val
         mismatch[hash] ||= begin
-          $log.warn "hasFile mismatch: importing? (%s)" % [name]
+          log.warn "hasFile mismatch: importing?"
           true
         end
         ok = false
@@ -112,8 +112,13 @@ module Commands
 end
 
 class PVR
-  def initialize(uri)
+  def initialize(uri, log)
     @uri = uri
+    @log = log
+  end
+
+  def history
+    fetch_all(add_uri("/history", page: 1)).to_a
   end
 
   protected def fetch_all(uri)
@@ -124,10 +129,8 @@ class PVR
     loop do
       Hash[URI.decode_www_form(uri.query || "")].
         slice("page", "pageSize").
-        tap { |h| $log.debug "fetching %p of %s" % [h, uri] }
-      resp = Net::HTTP.get_response uri
-      resp.kind_of? Net::HTTPSuccess \
-        or raise "unexpected response: %p (%s)" % [resp, resp.body]
+        tap { |h| @log.debug "fetching %p of %s" % [h, uri] }
+      resp = get_response! uri
       data = JSON.parse resp.body
       total = data.fetch "totalRecords"
       page = data.fetch "page"
@@ -136,7 +139,7 @@ class PVR
       end
       records = data.fetch "records"
       fetched += records.size
-      $log.debug "fetch result: %p" \
+      @log.debug "fetch result: %p" \
         % {total: total, page: page, fetched: fetched, records: records.size}
       break if records.empty?
       records.each { |r| yield r }
@@ -148,29 +151,26 @@ class PVR
   protected def add_uri(*args, &block)
     QBitTorrent.merge_uri @uri, *args, &block
   end
+
+  protected def get_response!(uri)
+    Net::HTTP.get_response(uri).tap do |resp|
+      resp.kind_of? Net::HTTPSuccess \
+        or raise "unexpected response: %p (%s)" % [resp, resp.body]
+    end
+  end
 end
 
 class Radarr < PVR
-  def history
-    fetch_all(add_uri("/history", page: 1)).to_a
-  end
 end
 
 class Sonarr < PVR
-  def history
-    fetch_all(add_uri("/history", page: 1)).to_a
-  end
-
   def queue
-    uri = add_uri "/queue"
-    resp = Net::HTTP.get_response uri
-    resp.kind_of? Net::HTTPSuccess \
-      or raise "unexpected response: %p (%s)" % [resp, resp.body]
-    JSON.parse resp.body
+    JSON.parse get_response!(add_uri "/queue").body
   end
 end
 
 if $0 == __FILE__
   require 'metacli'
-  MetaCLI.new(ARGV).run Commands
+  app = App.new Log.new($stderr, level: :info)
+  MetaCLI.new(ARGV).run app
 end
