@@ -56,7 +56,7 @@ class App
     ratio = t.fetch "ratio"
     min_ratio = t.fetch("max_ratio").
       yield_self { |r| r > 0 ? r : DEFAULT_MIN_RATIO }
-    time_limit = t.fetch("seeding_time_limit").
+    time_limit = t.fetch("max_seeding_time").
       yield_self { |mins| mins * 60 if mins > 0 }
     seed_time = (Time.now - Time.at(t.fetch "completion_on") if progress >= 1)
     seeding_done = ratio >= min_ratio \
