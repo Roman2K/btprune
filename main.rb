@@ -12,7 +12,7 @@ class App
         QBitTorrent.new URI(qbt), log: @log["qbt"]
       end
     rescue Timeout::Error
-      @log.warn "qBitTorrent HTTP API seems unavailable, aborting"
+      @log.debug "qBitTorrent HTTP API seems unavailable, aborting"
       exit 0
     end
 
@@ -91,9 +91,11 @@ class App
   end
 
   private def radarr_done(uri)
-    history_done Radarr.new(uri, @log["radarr"]).history do |ev|
-      ev.fetch("movie").fetch "hasFile"
-    end
+    history_done Radarr.new(uri, @log["radarr"]).history
+  end
+
+  private def sonarr_done(uri)
+    history_done Sonarr.new(uri, @log["sonarr"]).history
   end
 
   private def history_done(hist)
@@ -103,36 +105,14 @@ class App
       each { |ev|
         hash = (cl = ev.fetch("data")["downloadClient"] \
           and cl.downcase == "qbittorrent" \
-          and ev.fetch "downloadId") or next
-        done[hash.downcase] = yield ev
-      }
-    done
-  end
-
-  private def sonarr_done(uri)
-    sonarr = Sonarr.new uri, @log["sonarr"]
-
-    done = history_done sonarr.history do |ev|
-      ev.fetch("episode").fetch "hasFile"
-    end
-
-    mismatch = {}
-    sonarr.queue.each do |entry|
-      entry.fetch("protocol") == "torrent" or next
-      log = @log[torrent: entry.fetch("title")]
-      hash = entry.fetch("downloadId").downcase
-      ok = entry.fetch("episode").fetch("hasFile")
-      val = done[hash]
-      if !val.nil? && ok != val
-        mismatch[hash] ||= begin
-          log.warn "hasFile mismatch: importing?"
-          true
+          and ev.fetch("downloadId").downcase) or next
+        case ev.fetch("eventType")
+        when "grabbed"
+          done[hash] = false
+        when "downloadFolderImported"
+          done[hash] = true
         end
-        ok = false
-      end
-      done[hash] = ok
-    end
-
+      }
     done
   end
 end
@@ -190,9 +170,6 @@ class Radarr < PVR
 end
 
 class Sonarr < PVR
-  def queue
-    JSON.parse get_response!(add_uri "/queue").body
-  end
 end
 
 module Fmt
