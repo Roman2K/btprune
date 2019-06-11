@@ -16,11 +16,16 @@ class App
       exit 0
     end
 
-    done = {"radarr" => radarr, "sonarr" => sonarr}.tap do |h|
+    done = {
+      "radarr" => radarr,
+      "sonarr" => sonarr,
+      "lidarr" => nil,
+      "" => nil,
+    }.tap { |h|
       h.each do |cat, url|
         h[cat] = (send "#{cat}_done", URI(url) if url)
       end
-    end
+    }
 
     qbt.completed.each do |t|
       auto_delete qbt, t, done
@@ -31,12 +36,18 @@ class App
 
   private def auto_delete(qbt, t, done)
     cat = t.fetch "category"
-    log = @log["in %s" % cat, torrent: t.fetch("name")]
+    log = @log[
+      "in %s" % cat.yield_self { |s| s.empty? ? "[none]" : s },
+      torrent: t.fetch("name")
+    ]
     cat_done = done.fetch cat do
       log.error "unknown category"
       return
     end
-    cat_done or return
+    if !cat_done
+      log.debug "no configured PVR"
+      return
+    end
 
     ok = cat_done.fetch t.fetch("hash").downcase do
       log.warn "not found in PVR"
