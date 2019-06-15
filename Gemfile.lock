@@ -1,20 +1,14 @@
 GIT
-  remote: git://github.com/Roman2K/log-ruby.git
-  revision: 2a91b95dbad4f22b4a7433df51a3e84196d9a596
-  specs:
-    log-ruby (0.1.0)
-
-GIT
   remote: git://github.com/Roman2K/metacli.git
   revision: 3eb064e27e1e7b2a19280199b1e76e49ccdda634
   specs:
     metacli (0.1.0)
 
 GIT
-  remote: git://github.com/Roman2K/qbittorrent-ruby.git
-  revision: 32f60a00bb4c79d97ddb40d7e6cb874bc60398d4
+  remote: git://github.com/Roman2K/utils-ruby.git
+  revision: 54ab8cfc9ade9f1db466c5299bb0c8260407b534
   specs:
-    qbittorrent-ruby (0.1.0)
+    utils-ruby (0.1.0)
 
 GEM
   remote: https://rubygems.org/
@@ -29,10 +23,9 @@ PLATFORMS
   ruby
 
 DEPENDENCIES
-  log-ruby!
   metacli!
   pry
-  qbittorrent-ruby!
+  utils-ruby!
 
 BUNDLED WITH
    2.0.1

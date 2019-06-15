@@ -1,5 +1,5 @@
-require 'qbittorrent'
-require 'log'
+require 'timeout'
+require 'utils'
 
 class App
   def initialize(log)
@@ -9,7 +9,7 @@ class App
   def cmd_prune(qbt, radarr: nil, sonarr: nil)
     qbt = begin
       Timeout.timeout 2 do
-        QBitTorrent.new URI(qbt), log: @log["qbt"]
+        Utils::QBitTorrent.new URI(qbt), log: @log["qbt"]
       end
     rescue Timeout::Error
       @log.debug "qBitTorrent HTTP API seems unavailable, aborting"
@@ -115,6 +115,20 @@ class App
       }
     done
   end
+
+  module Fmt
+    def self.duration(*args, &block)
+      Utils::Fmt.duration *args, &block
+    end
+    
+    def self.ratio(r)
+      ("%.1f" % r).sub /\.0$/, ""
+    end
+
+    def self.progress(f)
+      ("%.1f%%" % [f*100]).sub /\.0%$/, "%"
+    end
+  end
 end
 
 class PVR
@@ -131,7 +145,7 @@ class PVR
     return enum_for __method__, uri unless block_given?
     fetched = 0
     total = nil
-    uri = QBitTorrent.merge_uri uri, pageSize: 200
+    uri = Utils.merge_uri uri, pageSize: 200
     loop do
       Hash[URI.decode_www_form(uri.query || "")].
         slice("page", "pageSize").
@@ -150,12 +164,12 @@ class PVR
       break if records.empty?
       records.each { |r| yield r }
       break if fetched >= total
-      uri = QBitTorrent.merge_uri uri, page: page + 1
+      uri = Utils.merge_uri uri, page: page + 1
     end
   end
 
   protected def add_uri(*args, &block)
-    QBitTorrent.merge_uri @uri, *args, &block
+    Utils.merge_uri @uri, *args, &block
   end
 
   protected def get_response!(uri)
@@ -172,27 +186,8 @@ end
 class Sonarr < PVR
 end
 
-module Fmt
-  def self.duration(d)
-    case
-    when d < 60 then "%ds" % d
-    when d < 3600 then m, d = d.divmod(60); "%dm%s" % [m, duration(d)]
-    when d < 86400 then h, d = d.divmod(3600); "%dh%s" % [h, duration(d)]
-    else ds, d = d.divmod(86400); "%dd%s" % [ds, duration(d)]
-    end.sub /([a-z])(0[a-z])+$/, '\1'
-  end
-  
-  def self.ratio(r)
-    ("%.1f" % r).sub /\.0$/, ""
-  end
-
-  def self.progress(f)
-    ("%.1f%%" % [f*100]).sub /\.0%$/, "%"
-  end
-end
-
 if $0 == __FILE__
   require 'metacli'
-  app = App.new Log.new($stderr, level: :info)
+  app = App.new Utils::Log.new($stderr, level: :info)
   MetaCLI.new(ARGV).run app
 end
