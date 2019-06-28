@@ -91,30 +91,48 @@ class App
   end
 
   private def radarr_done(uri)
-    history_done Radarr.new(uri, @log["radarr"]).history
+    history_done Radarr.new(uri, @log["radarr"]).history do |ev|
+      ev.fetch "movieId"
+    end
   end
 
   private def sonarr_done(uri)
-    history_done Sonarr.new(uri, @log["sonarr"]).history
+    history_done Sonarr.new(uri, @log["sonarr"]).history do |ev|
+      %w( seriesId episodeId ).map { |k| ev.fetch k }
+    end
   end
 
   private def history_done(hist)
     done = {}
+    by_id = {}
+
     hist.
       sort_by { |ev| ev.fetch "date" }.
       each { |ev|
         hash = (cl = ev.fetch("data")["downloadClient"] \
           and cl.downcase == "qbittorrent" \
           and ev.fetch("downloadId").downcase) or next
+
+        id = done[hash] = yield ev
+        date = ev.fetch "date"
+        update = -> ok do
+          st = by_id[id]
+          next if st && st.date > date
+          by_id[id] = ImportStatus.new(date, ok)
+        end
+
         case ev.fetch("eventType")
-        when "grabbed"
-          done[hash] = false
-        when "downloadFolderImported"
-          done[hash] = true
+        when "grabbed" then update[false]
+        when "downloadFolderImported" then update[true]
         end
       }
-    done
+
+    done.transform_values do |id|
+      by_id.fetch id
+    end
   end
+
+  ImportStatus = Struct.new :date, :ok
 
   module Fmt
     def self.duration(*args, &block)
@@ -188,6 +206,8 @@ end
 
 if $0 == __FILE__
   require 'metacli'
-  app = App.new Utils::Log.new($stderr, level: :info)
+  app = App.new Utils::Log.new($stderr, level: :info).tap { |log|
+    log.level = :debug if ENV["DEBUG"] == "1"
+  }
   MetaCLI.new(ARGV).run app
 end
