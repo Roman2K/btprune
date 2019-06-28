@@ -58,30 +58,21 @@ class App
       return
     end
 
-    progress = t.fetch "progress"
-    if progress < 1
-      log.debug "still downloading"
-      return
-    end
+    st = SeedStats.new t
 
-    ratio = t.fetch "ratio"
-    min_ratio = t.fetch("max_ratio").
-      yield_self { |r| r > 0 ? r : DEFAULT_MIN_RATIO }
-    time_limit = t.fetch("max_seeding_time").
-      yield_self { |mins| mins * 60 if mins > 0 }
-    seed_time = (Time.now - Time.at(t.fetch "completion_on") if progress >= 1)
-    seeding_done = ratio >= min_ratio \
-      || (time_limit && seed_time && seed_time >= time_limit)
+    log = log[st.seeding_done.yield_self { |done|
+      {progress: Fmt.progress(st.progress)}.tap { |h|
+        if !done || done == :ratio
+          h[:ratio] = "%s of %s" \
+            % [Fmt.ratio(st.ratio), Fmt.ratio(st.min_ratio)]
+        end
+        if !done || done == :time and (ts = [st.seed_time, st.time_limit]).any?
+          h[:seed_time] = "%s of %s" % ts.map { |t| t ? Fmt.duration(t) : "?" }
+        end
+      }
+    }]
 
-    log = log[{
-      progress: Fmt.progress(progress),
-      ratio: Fmt.ratio(ratio),
-      min_ratio: Fmt.ratio(min_ratio),
-      seed_time: (Fmt.duration seed_time if seed_time),
-      time_limit: (Fmt.duration time_limit if time_limit),
-    }.reject { |k,v| v.nil? }]
-
-    if !seeding_done
+    if !st.seeding_done
       log.debug "still seeding"
       return
     end
@@ -147,6 +138,31 @@ class App
       ("%.1f%%" % [f*100]).sub /\.0%$/, "%"
     end
   end
+end
+
+class SeedStats
+  def initialize(t)
+    @progress = t.fetch "progress"
+    @ratio = t.fetch "ratio"
+    @min_ratio = t.fetch("max_ratio").
+      yield_self { |r| r > 0 ? r : DEFAULT_MIN_RATIO }
+    @time_limit = t.fetch("max_seeding_time").
+      yield_self { |mins| mins * 60 if mins > 0 }
+    @seed_time = (Time.now - Time.at(t.fetch "completion_on") if @progress >= 1)
+    @seeding_done =
+      case
+      when @ratio >= @min_ratio
+        :ratio
+      when @time_limit && @seed_time && @seed_time >= @time_limit
+        :time
+      end
+  end
+
+  attr_reader \
+    :progress,
+    :ratio, :min_ratio,
+    :time_limit, :seed_time,
+    :seeding_done
 end
 
 class PVR
