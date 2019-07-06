@@ -131,11 +131,11 @@ class App
     end
     
     def self.ratio(r)
-      ("%.1f" % r).sub /\.0$/, ""
+      Utils::Fmt.d r, 2, z: false
     end
 
     def self.progress(f)
-      ("%.1f%%" % [f*100]).sub /\.0%$/, "%"
+      Utils::Fmt.pct f, 1, z: false
     end
   end
 end
