@@ -48,8 +48,6 @@ class App
     raise ConnError
   end
 
-  DEFAULT_MIN_RATIO = 10
-
   private def auto_delete(qbt, t, done)
     cat = t.fetch "category"
     log = @log[
@@ -157,6 +155,8 @@ class App
 end
 
 class SeedStats
+  DEFAULT_MIN_RATIO = 10
+
   def initialize(t)
     @progress = t.fetch "progress"
     @ratio = t.fetch "ratio"
