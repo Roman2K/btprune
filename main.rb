@@ -8,11 +8,9 @@ class App
 
   def cmd_prune(qbt, radarr: nil, sonarr: nil)
     qbt = begin
-      Timeout.timeout 2 do
-        Utils::QBitTorrent.new URI(qbt), log: @log["qbt"]
-      end
-    rescue Timeout::Error
-      @log.debug "qBitTorrent HTTP API seems unavailable, aborting"
+      try_conn { Utils::QBitTorrent.new URI(qbt), log: @log["qbt"] }
+    rescue ConnError
+      @log[err: $!].debug "qBitTorrent HTTP API seems unavailable, aborting"
       exit 0
     end
 
@@ -23,13 +21,31 @@ class App
       "" => nil,
     }.tap { |h|
       h.each do |cat, url|
-        h[cat] = (send "#{cat}_done", URI(url) if url)
+        h[cat] = begin
+          try_conn { send "#{cat}_done", URI(url) } if url
+        rescue ConnError
+          @log[err: $!].debug "#{cat} HTTP API seems unavailable, aborting"
+        end
       end
     }
 
     qbt.completed.each do |t|
       auto_delete qbt, t, done
     end
+  end
+
+  class ConnError < StandardError
+    def to_s
+      "connection error: %p" % cause
+    end
+  end
+
+  private def try_conn
+    Timeout.timeout 2 do
+      yield
+    end
+  rescue Timeout::Error, Errno::ECONNREFUSED
+    raise ConnError
   end
 
   DEFAULT_MIN_RATIO = 10
