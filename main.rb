@@ -6,10 +6,14 @@ class App
     @log = log
   end
 
+  CONN_TIMEOUT = 20
+
   def cmd_prune(qbt, radarr: nil, sonarr: nil)
     qbt = begin
-      try_conn { Utils::QBitTorrent.new URI(qbt), log: @log["qbt"] }
-    rescue ConnError
+      Utils.try_conn! CONN_TIMEOUT do
+        Utils::QBitTorrent.new URI(qbt), log: @log["qbt"]
+      end
+    rescue Utils::ConnError
       @log[err: $!].debug "qBitTorrent HTTP API seems unavailable, aborting"
       exit 0
     end
@@ -18,34 +22,26 @@ class App
       "radarr" => radarr,
       "sonarr" => sonarr,
       "lidarr" => nil,
+      "uncat_ok" => :done,
       "" => nil,
     }.tap { |h|
       h.each do |cat, url|
-        h[cat] = begin
-          try_conn { send "#{cat}_done", URI(url) } if url
-        rescue ConnError
-          @log[err: $!].debug "#{cat} HTTP API seems unavailable, aborting"
-        end
+        h[cat] =
+          case url
+          when :done then url
+          else
+            begin
+              send "#{cat}_done", URI(url) if url
+            rescue Utils::ConnError
+              @log[err: $!].warn "#{cat} HTTP API seems unavailable, aborting"
+            end
+          end
       end
     }
 
     qbt.completed.each do |t|
       auto_delete qbt, t, done
     end
-  end
-
-  class ConnError < StandardError
-    def to_s
-      "connection error: %p" % cause
-    end
-  end
-
-  private def try_conn
-    Timeout.timeout 2 do
-      yield
-    end
-  rescue Timeout::Error, Errno::ECONNREFUSED
-    raise ConnError
   end
 
   private def auto_delete(qbt, t, done)
@@ -63,10 +59,15 @@ class App
       return
     end
 
-    ok = cat_done.fetch t.fetch("hash").downcase do
-      log.warn "not found in PVR"
-      return
-    end
+    ok =
+      case cat_done
+      when :done then true
+      else
+        cat_done.fetch t.fetch("hash").downcase do
+          log.warn "not found in PVR"
+          return
+        end
+      end
     if !ok
       log.warn "not imported by PVR"
       return
@@ -96,13 +97,15 @@ class App
   end
 
   private def radarr_done(uri)
-    history_done Radarr.new(uri, @log["radarr"]).history do |ev|
+    pvr = Utils::PVR::Radarr.new uri, timeout: CONN_TIMEOUT, log: @log["radarr"]
+    history_done pvr.history do |ev|
       ev.fetch "movieId"
     end
   end
 
   private def sonarr_done(uri)
-    history_done Sonarr.new(uri, @log["sonarr"]).history do |ev|
+    pvr = Utils::PVR::Sonarr.new uri, timeout: CONN_TIMEOUT, log: @log["sonarr"]
+    history_done pvr.history do |ev|
       %w( seriesId episodeId ).map { |k| ev.fetch k }
     end
   end
@@ -179,61 +182,6 @@ class SeedStats
     :ratio, :min_ratio,
     :time_limit, :seed_time,
     :seeding_done
-end
-
-class PVR
-  def initialize(uri, log)
-    @uri = uri
-    @log = log
-  end
-
-  def history
-    fetch_all(add_uri("/history", page: 1)).to_a
-  end
-
-  protected def fetch_all(uri)
-    return enum_for __method__, uri unless block_given?
-    fetched = 0
-    total = nil
-    uri = Utils.merge_uri uri, pageSize: 200
-    loop do
-      Hash[URI.decode_www_form(uri.query || "")].
-        slice("page", "pageSize").
-        tap { |h| @log.debug "fetching %p of %s" % [h, uri] }
-      resp = get_response! uri
-      data = JSON.parse resp.body
-      total = data.fetch "totalRecords"
-      page = data.fetch "page"
-      if fetched <= 0 && page > 1
-        fetched = data.fetch("pageSize") * (page - 1)
-      end
-      records = data.fetch "records"
-      fetched += records.size
-      @log.debug "fetch result: %p" \
-        % {total: total, page: page, fetched: fetched, records: records.size}
-      break if records.empty?
-      records.each { |r| yield r }
-      break if fetched >= total
-      uri = Utils.merge_uri uri, page: page + 1
-    end
-  end
-
-  protected def add_uri(*args, &block)
-    Utils.merge_uri @uri, *args, &block
-  end
-
-  protected def get_response!(uri)
-    Net::HTTP.get_response(uri).tap do |resp|
-      resp.kind_of? Net::HTTPSuccess \
-        or raise "unexpected response: %p (%s)" % [resp, resp.body]
-    end
-  end
-end
-
-class Radarr < PVR
-end
-
-class Sonarr < PVR
 end
 
 if $0 == __FILE__
