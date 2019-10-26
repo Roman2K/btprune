@@ -2,16 +2,17 @@ require 'timeout'
 require 'utils'
 
 class App
-  def initialize(log)
+  def initialize(qbt, radarr: nil, sonarr: nil, log:)
+    @qbt, @radarr, @sonarr = qbt, radarr, sonarr
     @log = log
   end
 
   CONN_TIMEOUT = 20
 
-  def cmd_prune(qbt, radarr: nil, sonarr: nil)
+  def cmd_prune
     qbt = begin
       Utils.try_conn! CONN_TIMEOUT do
-        Utils::QBitTorrent.new URI(qbt), log: @log["qbt"]
+        Utils::QBitTorrent.new @qbt, log: @log["qbt"]
       end
     rescue Utils::ConnError
       @log[err: $!].debug "qBitTorrent HTTP API seems unavailable, aborting"
@@ -19,19 +20,19 @@ class App
     end
 
     done = {
-      "radarr" => radarr,
-      "sonarr" => sonarr,
+      "radarr" => @radarr,
+      "sonarr" => @sonarr,
       "lidarr" => nil,
       "uncat_ok" => :done,
       "" => nil,
     }.tap { |h|
-      h.each do |cat, url|
+      h.each do |cat, uri|
         h[cat] =
-          case url
-          when :done then url
+          case uri
+          when :done then uri
           else
             begin
-              send "#{cat}_done", URI(url) if url
+              send "#{cat}_done", uri if uri
             rescue Utils::ConnError
               @log[err: $!].warn "#{cat} HTTP API seems unavailable, aborting"
             end
@@ -186,8 +187,15 @@ end
 
 if $0 == __FILE__
   require 'metacli'
-  app = App.new Utils::Log.new($stderr, level: :info).tap { |log|
+  config = Utils::Conf.new "config.yml"
+  qbt = URI config["qbt"]
+  pvrs = %i( radarr sonarr ).each_with_object({}) do |name, h|
+    url = config[name] or next
+    h[name] = URI url
+  end
+  log = Utils::Log.new($stderr, level: :info).tap { |log|
     log.level = :debug if ENV["DEBUG"] == "1"
   }
+  app = App.new qbt, log: log, **pvrs
   MetaCLI.new(ARGV).run app
 end
