@@ -160,6 +160,7 @@ end
 
 class SeedStats
   DEFAULT_MIN_RATIO = 10
+  DEFAULT_TIME_LIMIT = 30 * 24 * 3600
 
   def initialize(t)
     @progress = t.fetch "progress"
@@ -167,7 +168,7 @@ class SeedStats
     @min_ratio = t.fetch("max_ratio").
       yield_self { |r| r > 0 ? r : DEFAULT_MIN_RATIO }
     @time_limit = t.fetch("max_seeding_time").
-      yield_self { |mins| mins * 60 if mins > 0 }
+      yield_self { |mins| mins > 0 ? mins * 60 : DEFAULT_TIME_LIMIT }
     @seed_time = (Time.now - Time.at(t.fetch "completion_on") if @progress >= 1)
     @seeding_done =
       case
@@ -187,15 +188,16 @@ end
 
 if $0 == __FILE__
   require 'metacli'
+
   config = Utils::Conf.new "config.yml"
   qbt = URI config["qbt"]
   pvrs = %i( radarr sonarr ).each_with_object({}) do |name, h|
     url = config[name] or next
     h[name] = URI url
   end
-  log = Utils::Log.new($stderr, level: :info).tap { |log|
-    log.level = :debug if ENV["DEBUG"] == "1"
-  }
+  log = Utils::Log.new $stderr, level: :info
+  log.level = :debug if ENV["DEBUG"] == "1"
+
   app = App.new qbt, log: log, **pvrs
   MetaCLI.new(ARGV).run app
 end
