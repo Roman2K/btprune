@@ -9,13 +9,19 @@ class App
 
   CONN_TIMEOUT = 20
 
+  private def is_unavail?(err)
+    Utils::ConnError === err \
+      || /^unexpected response\b.*\b502\b/ === err.message
+  end
+
   def cmd_prune
     qbt = begin
       Utils.try_conn! CONN_TIMEOUT do
         Utils::QBitTorrent.new @qbt, log: @log["qbt"]
       end
-    rescue Utils::ConnError
-      @log[err: $!].debug "qBitTorrent HTTP API seems unavailable, aborting"
+    rescue => err
+      is_unavail?(err) or raise
+      @log[err: err].debug "qBitTorrent HTTP API seems unavailable, aborting"
       exit 0
     end
 
@@ -33,8 +39,9 @@ class App
           else
             begin
               send "#{cat}_done", uri if uri
-            rescue Utils::ConnError
-              @log[err: $!].warn "#{cat} HTTP API seems unavailable, aborting"
+            rescue => err
+              is_unavail?(err) or raise
+              @log[err: err].warn "#{cat} HTTP API seems unavailable, aborting"
             end
           end
       end
