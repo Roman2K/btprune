@@ -1,4 +1,3 @@
-require 'timeout'
 require 'utils'
 
 class App
@@ -7,20 +6,11 @@ class App
     @log = log
   end
 
-  CONN_TIMEOUT = 20
-
-  private def is_unavail?(err)
-    Utils::ConnError === err \
-      || /^unexpected response\b.*\b502\b/ === err.message
-  end
-
   def cmd_prune
     qbt = begin
-      Utils.try_conn! CONN_TIMEOUT do
-        Utils::QBitTorrent.new @qbt, log: @log["qbt"]
-      end
+      Utils::QBitTorrent.new @qbt, log: @log["qbt"]
     rescue => err
-      is_unavail?(err) or raise
+      Utils.is_unavail?(err) or raise
       @log[err: err].debug "qBitTorrent HTTP API seems unavailable, aborting"
       exit 0
     end
@@ -40,7 +30,7 @@ class App
             begin
               send "#{cat}_done", uri if uri
             rescue => err
-              is_unavail?(err) or raise
+              Utils.is_unavail?(err) or raise
               @log[err: err].warn "#{cat} HTTP API seems unavailable, aborting"
             end
           end
@@ -105,14 +95,14 @@ class App
   end
 
   private def radarr_done(uri)
-    pvr = Utils::PVR::Radarr.new uri, timeout: CONN_TIMEOUT, log: @log["radarr"]
+    pvr = Utils::PVR::Radarr.new uri, log: @log["radarr"]
     history_done pvr.history do |ev|
       ev.fetch "movieId"
     end
   end
 
   private def sonarr_done(uri)
-    pvr = Utils::PVR::Sonarr.new uri, timeout: CONN_TIMEOUT, log: @log["sonarr"]
+    pvr = Utils::PVR::Sonarr.new uri, log: @log["sonarr"]
     history_done pvr.history do |ev|
       %w( seriesId episodeId ).map { |k| ev.fetch k }
     end
