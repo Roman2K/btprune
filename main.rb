@@ -32,6 +32,7 @@ class App
             rescue => err
               Utils.is_unavail?(err) or raise
               @log[err: err].warn "#{cat} HTTP API seems unavailable, aborting"
+              nil
             end
           end
       end
@@ -133,8 +134,10 @@ class App
         end
       }
 
+    # Before: hash -> id
+    # After: hash -> ok
     done.transform_values do |id|
-      by_id.fetch id
+      by_id.fetch(id).ok
     end
   end
 
