@@ -117,7 +117,7 @@ class App
       sort_by { |ev| ev.fetch "date" }.
       each { |ev|
         hash = (cl = ev.fetch("data")["downloadClient"] \
-          and cl.downcase == "qbittorrent" \
+          and %w[qbittorrent qbt].include?(cl.downcase) \
           and ev.fetch("downloadId").downcase) or next
 
         id = done[hash] = yield ev
