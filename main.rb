@@ -30,7 +30,7 @@ class App
             begin
               send "#{cat}_done", uri if uri
             rescue => err
-              Utils.is_unavail?(err) or raise
+              raise unless Utils.is_unavail?(err)
               @log[err: err].warn "#{cat} HTTP API seems unavailable, aborting"
               nil
             end
@@ -73,20 +73,17 @@ class App
     end
 
     st = SeedStats.new t
+    done, score = st.seeding_done
 
-    log = log[st.seeding_done.yield_self { |done|
-      {progress: Fmt.progress(st.progress)}.tap { |h|
-        if !done || done == :ratio
-          h[:ratio] = "%s of %s" \
-            % [Fmt.ratio(st.ratio), Fmt.ratio(st.min_ratio)]
-        end
-        if !done || done == :time and (ts = [st.seed_time, st.time_limit]).any?
-          h[:seed_time] = "%s of %s" % ts.map { |t| t ? Fmt.duration(t) : "?" }
-        end
-      }
-    }]
+    log = log[
+      progress: Fmt.progress(st.progress),
+      ratio: "%s of %s" % [Fmt.ratio(st.ratio), Fmt.ratio(st.min_ratio)],
+      seed_time: "%s of %s" \
+        % [st.seed_time, st.time_limit].map { |t| t ? Fmt.duration(t) : "?" },
+      score: Fmt.score(score),
+    ]
 
-    if !st.seeding_done
+    if !done
       log.debug "still seeding"
       return
     end
@@ -155,6 +152,10 @@ class App
     def self.progress(f)
       Utils::Fmt.pct f, 1, z: false
     end
+
+    def self.score(s)
+      Utils::Fmt.d s, 2, z: false
+    end
   end
 end
 
@@ -170,13 +171,14 @@ class SeedStats
     @time_limit = t.fetch("max_seeding_time").
       yield_self { |mins| mins > 0 ? mins * 60 : DEFAULT_TIME_LIMIT }
     @seed_time = (Time.now - Time.at(t.fetch "completion_on") if @progress >= 1)
-    @seeding_done =
-      case
-      when @ratio >= @min_ratio
-        :ratio
-      when @time_limit && @seed_time && @seed_time >= @time_limit
-        :time
-      end
+    @seeding_done = compute_seeding_score.
+      yield_self { |score| [score >= 100, score] }
+  end
+
+  private def compute_seeding_score
+    @seed_time or return 0
+    [ @ratio.to_f / @min_ratio,
+      @seed_time.to_f / @time_limit ].sum * 100
   end
 
   attr_reader \
