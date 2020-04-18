@@ -177,8 +177,7 @@ class SeedStats
 
   private def compute_seeding_score
     @seed_time or return 0
-    [ @ratio.to_f / @min_ratio,
-      @seed_time.to_f / @time_limit ].sum * 100
+    (@ratio.to_f / @min_ratio + @seed_time.to_f / @time_limit) * 100
   end
 
   attr_reader \
