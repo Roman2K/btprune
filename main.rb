@@ -131,6 +131,12 @@ class Cleaner
       ratio: "%s of %s" % [Fmt.ratio(st.ratio), Fmt.ratio(st.min_ratio)],
     ]
 
+    if st.state == SeedStats::Statuses::ERROR
+      log.warn "erroneous, rechecking"
+      real_mode { @qbt.recheck t }
+      return
+    end
+
     health = st.health
     if !health.ok
       log[
@@ -260,15 +266,13 @@ class SeedStats
   end
 
   private def compute_health_score
-    @progress < 1 or return 1
-    @state != Statuses::ERROR or return 0
-    @state == Statuses::STALLED_DL or return 1
+    return 1 unless @progress < 1 && @state == Statuses::STALLED_DL
     [1 - (@added_time - @dl_grace) / @dl_time_limit, 0].max \
       + @progress * (@availability * 2)
   end
 
   attr_reader \
-    :progress,
+    :state, :progress,
     :ratio, :min_ratio,
     :seed_time, :time_limit, :seeding,
     :added_time, :availability, :health

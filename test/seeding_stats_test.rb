@@ -65,12 +65,6 @@ class SeedStatsTest < Minitest::Test
     assert score.ok
     assert_equal 1, score.to_f
 
-    score = get_health[added_days_ago: 1, avail: 1, progress: 1.0,
-      state: SeedStats::Statuses::ERROR,
-    ]
-    assert score.ok
-    assert_equal 1, score.to_f
-
     score = get_health[added_days_ago: 7, avail: 0.2, progress: 1.0]
     assert score.ok
     assert_equal 1, score.to_f
@@ -80,18 +74,16 @@ class SeedStatsTest < Minitest::Test
     assert score.to_f > 1.0
     assert score.to_f < 2.0
 
-    score = get_health[added_days_ago: 0.9, avail: 0.1, progress: 0.0,
-      state: SeedStats::Statuses::ERROR,
-    ]
-    refute score.ok
-
     score = get_health[added_days_ago: 1, avail: 0.1, progress: 0.0]
     assert !score.ok
 
-    score = get_health[added_days_ago: 1, avail: 0.1, progress: 0.0,
-      state: SeedStats::Statuses::DOWNLOADING,
-    ]
-    assert score.ok
+    %i[DOWNLOADING ERROR].each do |st|
+      st = SeedStats::Statuses.const_get st
+      score = get_health[added_days_ago: 1, avail: 0.1, progress: 0.0,
+        state: st,
+      ]
+      assert score.ok
+    end
 
     score = get_health[added_days_ago: 3, avail: 0.5, progress: 0.5]
     assert score.ok
