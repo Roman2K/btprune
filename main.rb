@@ -266,7 +266,11 @@ class SeedStats
   end
 
   private def compute_health_score
-    return 1 unless @progress < 1 && @state == Statuses::STALLED_DL
+    unless @progress < 1 \
+      && [Statuses::STALLED_DL, Statuses::META_DL].include?(@state)
+    then
+      return 1
+    end
     [1 - (@added_time - @dl_grace) / @dl_time_limit, 0].max \
       + @progress * (@availability * 2)
   end
@@ -286,6 +290,7 @@ class SeedStats
     DOWNLOADING = "downloading".freeze
     ERROR = "error".freeze
     STALLED_DL = "stalledDL".freeze
+    META_DL = "metaDL".freeze
   end
 end
 
