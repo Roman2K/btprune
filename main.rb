@@ -1,8 +1,8 @@
 require 'utils'
 
 class App
-  def initialize(qbt, radarr: nil, sonarr: nil, dry_run: true, log:)
-    @qbt, @radarr, @sonarr = qbt, radarr, sonarr
+  def initialize(qbt, pvrs: [], dry_run: true, log:)
+    @qbt, @pvrs = qbt, pvrs
     @dry_run = dry_run
     @log = log
     @log[dry_run: @dry_run].debug "initialized"
@@ -18,27 +18,20 @@ class App
     end
 
     imported = {
-      "radarr" => @radarr,
-      "sonarr" => @sonarr,
       "lidarr" => nil,
       "uncat_ok" => :done,
       "" => nil,
-    }.tap { |h|
-      h.each do |cat, uri|
-        h[cat] =
-          case uri
-          when :done then uri
-          else
-            begin
-              send "imported_#{cat}", uri if uri
-            rescue => err
-              raise unless Utils.is_unavail?(err)
-              @log[err: err].warn "#{cat} HTTP API seems unavailable, aborting"
-              nil
-            end
-          end
-      end
     }
+    @pvrs.each do |pvr|
+      done = begin
+        imported_from_pvr(pvr)
+      rescue => err
+        raise unless Utils.is_unavail?(err)
+        @log[err: err].warn "#{pvr} HTTP API seems unavailable, skipping"
+        next nil
+      end
+      imported[pvr.name.downcase] = [done, pvr]
+    end
 
     cleaner = Cleaner.new qbt, imported, dry_run: @dry_run
     qbt.torrents.each { |t| cleaner.clean t, log: @log }
@@ -47,35 +40,18 @@ class App
     @log.info "marked %d torrents as failed" % [cleaner.failed_count]
   end
 
-  private def imported_radarr(uri)
-    imported_pvr Utils::PVR::Radarr.new(uri, log: @log["radarr"]) do |ev|
-      ev.fetch "movieId"
-    end
-  end
-
-  private def imported_sonarr(uri)
-    imported_pvr Utils::PVR::Sonarr.new(uri, log: @log["sonarr"]) do |ev|
-      %w( seriesId episodeId ).map { |k| ev.fetch k }
-    end
-  end
-
-  private def imported_pvr(pvr)
-    done = imported_from_history(pvr.history) { |ev| yield ev }
-    [done, pvr]
-  end
-
-  private def imported_from_history(hist)
+  private def imported_from_pvr(pvr)
     done = {}
     by_id = {}
 
-    hist.
+    pvr.history.
       sort_by { |ev| ev.fetch "date" }.
       each { |ev|
         hash = (cl = ev.fetch("data")["downloadClient"] \
           and %w[qbittorrent qbt].include?(cl.downcase) \
           and ev.fetch("downloadId").downcase) or next
 
-        id = done[hash] = yield ev
+        id = done[hash] = [pvr.name, pvr.history_entity_id(ev)]
         date = ev.fetch "date"
         update = -> ok do
           st = by_id[id]
@@ -296,18 +272,14 @@ end
 
 if $0 == __FILE__
   require 'metacli'
-
   config = Utils::Conf.new "config.yml"
-  dry_run = config["dry_run"]
-  qbt = URI config["qbt"]
-  pvrs = %i( radarr sonarr ).each_with_object({}) do |name, h|
-    url = config[name] or next
-    h[name] = URI url
-  end
-
   log = Utils::Log.new $stderr, level: :info
   log.level = :debug if ENV["DEBUG"] == "1"
-
-  app = App.new qbt, dry_run: dry_run, log: log, **pvrs
+  dry_run = config["dry_run"]
+  qbt = URI config["qbt"]
+  pvrs = config[:pvrs].to_hash.map do |name, url|
+    Utils::PVR.const_get(name).new(URI(url), log: log[name])
+  end
+  app = App.new qbt, pvrs: pvrs, dry_run: dry_run, log: log
   MetaCLI.new(ARGV).run app
 end
