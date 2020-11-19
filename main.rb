@@ -1,183 +1,191 @@
 require 'utils'
+require 'time'
 
 class App
-  def initialize(qbt, pvrs: [], dry_run: true, log:)
-    @qbt, @pvrs = qbt, pvrs
+  def initialize(client, pvrs: [], dry_run: true, log:)
+    @client, @pvrs = client, pvrs
     @dry_run = dry_run
     @log = log
     @log[dry_run: @dry_run].debug "initialized"
   end
 
   def cmd_prune
-    qbt = begin
-      Utils::QBitTorrent.new @qbt, log: @log["qbt"]
-    rescue => err
-      Utils.is_unavail?(err) or raise
-      @log[err: err].debug "qBitTorrent HTTP API seems unavailable, aborting"
-      exit 0
-    end
-
-    imported = {
+    categories = {
       "lidarr" => nil,
-      "uncat_ok" => :done,
+      "uncat_ok" => :imported,
       "" => nil,
     }
     @pvrs.each do |pvr|
-      done = begin
-        imported_from_pvr(pvr)
-      rescue => err
-        raise unless Utils.is_unavail?(err)
-        @log[err: err].warn "#{pvr} HTTP API seems unavailable, skipping"
-        next nil
-      end
-      imported[pvr.name.downcase] = [done, pvr]
+      categories[pvr.name.downcase] = pvr
     end
 
-    cleaner = Cleaner.new qbt, imported, dry_run: @dry_run
-    qbt.torrents.each { |t| cleaner.clean t, log: @log }
+    cleaner = Cleaner.new @client, categories, dry_run: @dry_run, log: @log
+    cleaner.clean
+
     @log.info "freed %s by deleting %d torrents" \
       % [Utils::Fmt.size(cleaner.freed), cleaner.deleted_count]
     @log.info "marked %d torrents as failed" % [cleaner.failed_count]
   end
-
-  private def imported_from_pvr(pvr)
-    done = {}
-    by_id = {}
-
-    pvr.history.
-      sort_by { |ev| ev.fetch "date" }.
-      each { |ev|
-        hash = (cl = ev.fetch("data")["downloadClient"] \
-          and %w[qbittorrent qbt].include?(cl.downcase) \
-          and ev.fetch("downloadId").downcase) or next
-
-        id = done[hash] = [pvr.name, pvr.history_entity_id(ev)]
-        date = ev.fetch "date"
-        update = -> ok do
-          st = by_id[id]
-          next if st && st.date > date
-          by_id[id] = ImportStatus.new(date, ok)
-        end
-
-        case ev.fetch("eventType")
-        when "grabbed" then update[false]
-        when "downloadFolderImported" then update[true]
-        end
-      }
-
-    # Before: hash -> id
-    # After: hash -> ok
-    done.transform_values do |id|
-      by_id.fetch(id).ok
-    end
-  end
-
-  ImportStatus = Struct.new :date, :ok
 end
 
 class Cleaner
-  def initialize(qbt, imported, dry_run:)
-    @qbt = qbt
-    @imported = imported
+  def initialize(client, categories, dry_run:, log:)
+    @client = client
+    @categories = categories
     @dry_run = dry_run
+    @log = log
+
     @queues = Hash.new { |cache, pvr| cache[pvr] = pvr.queue }
     @freed = @deleted_count = @failed_count = 0
   end
 
   attr_reader :freed, :deleted_count, :failed_count
 
-  def clean(t, log:)
-    cat = t.fetch "category"
-    log = log[
-      "in %s" % cat.yield_self { |s| s.empty? ? "[none]" : s },
-      torrent: t.fetch("name")
-    ]
-    cat_done, pvr = @imported.fetch cat do
-      log.error "unknown category"
+  MAX_DISK_USE = 300 * (1024 ** 3)
+
+  def clean
+    torrents = @client.torrents.map do |t|
+      cat = t.cat
+      cat = "[no category]" if cat.empty?
+      t.log = @log[cat, torrent: t.name]
+      t
+    end
+    assign_statuses! torrents
+
+    init_used = torrents.sum &:size
+    @log.info "used: %s of %s" \
+      % [init_used, MAX_DISK_USE].map { Utils::Fmt.size _1 }
+
+    prev_used = nil
+    torrents.
+      map { |t| [t, SeedStats.new(t)] }.
+      sort_by { |t, st| -st.ratio }.
+      each { |t, st|
+        may_delete t, st, should_free: (init_used - @freed) >= MAX_DISK_USE
+        if (used = init_used - @freed) != prev_used
+          @log.info "used after deletes: #{Utils::Fmt.size used}"
+          prev_used = used
+        end
+      }
+  end
+
+  private def assign_statuses!(tors)
+    tors = tors.group_by(&:cat)
+    @categories.each do |cat, pvr|
+      ts = tors.delete(cat) { [] }
+      ts.each { |t| t.pvr = pvr } if Utils::PVR::Basic === pvr
+      assign_statuses_from_pvr! ts, pvr
+    end
+    tors.each do |_, ts|
+      ts.each { |t| t.status = :unknown_cat }
+    end
+  end
+
+  private def assign_statuses_from_pvr!(tors, pvr)
+    if !pvr
+      tors.each { |t| t.status = :no_pvr }
       return
     end
-    if !cat_done
+    if pvr == :imported
+      tors.each { |t| t.status = pvr }
+      return
+    end
+
+    oldest = tors.map { |t| t.added_on }.min or return
+
+    tors = tors.each_with_object({}) do |t,h|
+      h[t.hash_string.downcase] = t
+    end
+
+    pvr.history_events.each do |ev|
+      t = (cl = ev.fetch("data")["downloadClient"]&.downcase \
+        and cl == 'transmission' \
+        and tors.delete(ev.fetch("downloadId").downcase)) or next
+      t.status =
+        case ev.fetch("eventType")
+        when "grabbed" then :grabbed
+        when "downloadFolderImported" then :imported
+        end
+      break if tors.empty? || Time.parse(ev.fetch "date") < oldest
+    end
+  end
+
+  def may_delete(t, st, should_free:)
+    log = t.log[status: t.status]
+
+    case t.status
+    when :unknown_cat
+      log.error "unknown category"
+      return
+    when :no_pvr
       log.debug "no configured PVR"
       return
     end
 
-    st = SeedStats.new t
-    log = log[
-      progress: Fmt.progress(st.progress),
-      ratio: "%s of %s" % [Fmt.ratio(st.ratio), Fmt.ratio(st.min_ratio)],
-    ]
-
-    if st.state == SeedStats::Statuses::ERROR
-      log.warn "erroneous, rechecking"
-      real_mode { @qbt.recheck t }
-      return
-    end
+    log = log[progress: Fmt.progress(st.progress), ratio: Fmt.ratio(st.ratio)]
 
     health = st.health
+    dl_log = -> { log[
+      torrent_state: t.state,
+      added_time: Fmt.duration(st.added_time),
+      health: Fmt.score(health),
+    ] }
+
     if !health.ok
-      log[
-        added_time: Fmt.duration(st.added_time),
-        avail: Fmt.ratio(st.availability),
-        health: Fmt.score(health),
-      ].info "low health, marking as failed" do
-        mark_failed pvr, t, log: log
+      dl_log.().info "low health, marking as failed" do
+        mark_failed t, log: log
       end
       return
     end
 
     if st.progress < 1
-      log.debug "still downloading"
+      dl_log.().info "still downloading"
       return
     end
 
     seeding = st.seeding
     log = log[
-      seed_time: "%s of %s" \
-        % [st.seed_time, st.time_limit].map { |t| t ? Fmt.duration(t) : "?" },
+      seed_time: st.seed_time.then { |t| t ? Fmt.duration(t) : "?" },
       seed_score: Fmt.score(seeding),
     ]
 
-    if !seeding.ok
-      log.debug "still seeding"
+    if should_free
+      log.debug "should free up space"
+    else
       return
     end
 
-    import_ok =
-      case cat_done
-      when :done then true
-      else
-        cat_done.fetch t.fetch("hash").downcase do
-          log.warn "not found in PVR"
-          return
-        end
+    case t.status
+    when :imported
+      log.info "imported, deleting" do
+        delete t
       end
-    if !import_ok
-      log.warn "not imported by PVR"
-      return
-    end
-
-    log.info "fully seeded, deleting" do
-      real_mode { @qbt.delete_perm t }
-      @deleted_count += 1
-      @freed += t.fetch("size")
+    else
+      log.error "unhandled status, not deleting"
     end
   end
 
-  private def mark_failed(pvr, t, log:)
-    qid = @queues[pvr].find { |item|
-      item.fetch("downloadId").downcase == t.fetch("hash").downcase
+  private def delete(t)
+    real_mode { @client.delete_perm [t.hash_string] }
+    @deleted_count += 1
+    @freed += t.size
+  end
+
+  private def mark_failed(t, log:)
+    qid = @queues[t.pvr].find { |item|
+      item.fetch("downloadId").downcase == t.hash_string.downcase
     }&.fetch "id"
 
     unless qid
-      log[torrent_state: t.fetch("state")].
+      log[torrent_state: t.state].
         warn "item not found in PVR queue, deleting torrent" do
-          real_mode { @qbt.delete_perm t }
+          delete t
         end
       return
     end
 
     log[queue_item: qid].debug "deleting from queue and blacklisting" do
-      real_mode { pvr.queue_del qid, blacklist: true }
+      real_mode { t.pvr.queue_del qid, blacklist: true }
       @failed_count += 1
     end
   end
@@ -200,73 +208,123 @@ class Cleaner
     end
 
     def self.score(s)
-      "%s (%s)" % [progress(s.to_f), s.ok ? "OK" : "!!"]
+      "%s:%s" % [progress(s.to_f), s.ok ? "OK" : "!!"]
+    end
+  end
+end
+
+class Torrent
+  STATUSES = {
+    0 => :stopped,
+    1 => :check_wait,
+    2 => :check,
+    3 => :download_wait,
+    4 => :download,
+    5 => :seed_wait,
+    6 => :seed,
+  }.freeze
+
+  API_FIELDS = %w[
+    hashString name downloadDir totalSize status addedDate doneDate percentDone
+    uploadRatio desiredAvailable
+  ]
+
+  def initialize(data); @data = data end
+  attr_accessor :log, :status, :pvr
+
+  def name; @data.fetch "name" end
+  def cat; File.basename @data.fetch("downloadDir") end
+  def hash_string; @data.fetch "hashString" end
+  def size; @data.fetch "totalSize" end
+  def state; STATUSES.fetch @data.fetch "status" end
+  def added_on; Time.at @data.fetch "addedDate" end
+  def completion_on; Time.at @data.fetch "doneDate" end
+  def progress; @data.fetch "percentDone" end
+  def ratio; @data.fetch "uploadRatio" end
+
+  def attrs
+    {}.tap do |h|
+      %i[ name cat hash_string size state added_on completion_on progress
+          ratio ].each \
+      do |k|
+        h[k] = public_send k
+      end
     end
   end
 end
 
 class SeedStats
-  DEFAULT_MIN_RATIO = 10
-  DEFAULT_TIME_LIMIT = 30 * 24 * 3600
-  DEFAULT_DL_TIME_LIMIT = 30 * 24 * 3600
-  DEFAULT_DL_GRACE = 1 * 24 * 3600
+  DEFAULT_DL_TIME_LIMIT = 4 * 24 * 3600
+  DEFAULT_DL_GRACE = 1 * 3600
 
-  def initialize(t,
-    dl_time_limit: DEFAULT_DL_TIME_LIMIT, dl_grace: DEFAULT_DL_GRACE
-  )
-    @dl_time_limit = dl_time_limit
-    @dl_grace = dl_grace
+  def initialize(t)
+    @dl_time_limit = DEFAULT_DL_TIME_LIMIT
+    @dl_grace = DEFAULT_DL_GRACE
 
-    @state = t.fetch "state"
-    @progress = t.fetch "progress"
-    @ratio = t.fetch "ratio"
-    @min_ratio = t.fetch("max_ratio").
-      yield_self { |r| r > 0 ? r : DEFAULT_MIN_RATIO }
+    @state = t.state
+    @progress = t.progress
+    @ratio = t.ratio
 
     now = Time.now
-    @added_time = now - Time.at(t.fetch "added_on")
-    @availability = t.fetch "availability"
-
-    @seed_time = (now - Time.at(t.fetch "completion_on") if @progress >= 1)
-    @time_limit = t.fetch("max_seeding_time").
-      yield_self { |mins| mins > 0 ? mins * 60 : DEFAULT_TIME_LIMIT }
+    @added_time = now - Time.at(t.added_on)
+    @seed_time = (now - Time.at(t.completion_on) if @progress >= 1)
 
     @health = Score.new compute_health_score
-    @seeding = Score.new compute_seeding_score
-  end
-
-  private def compute_seeding_score
-    @seed_time or return 0
-    @ratio.to_f / @min_ratio \
-      + @seed_time.to_f / @time_limit
+    @seeding = Score.new @ratio
   end
 
   private def compute_health_score
-    unless @progress < 1 \
-      && [Statuses::STALLED_DL, Statuses::META_DL].include?(@state)
-    then
+    unless @progress < 1 && %i[download_wait download stopped].include?(@state)
       return 1
     end
-    [1 - (@added_time - @dl_grace) / @dl_time_limit, 0].max \
-      + @progress * (@availability * 2)
+    [1 - (@added_time - @dl_grace) / @dl_time_limit, 0].max + @progress * 2
   end
 
   attr_reader \
-    :state, :progress,
-    :ratio, :min_ratio,
-    :seed_time, :time_limit, :seeding,
-    :added_time, :availability, :health
+    :state, :progress, :ratio,
+    :added_time, :seed_time, :health, :seeding
 
   Score = Struct.new :num do
     def to_f; num.to_f end
     def ok; num >= 1 end
   end
+end
 
-  module Statuses
-    DOWNLOADING = "downloading".freeze
-    ERROR = "error".freeze
-    STALLED_DL = "stalledDL".freeze
-    META_DL = "metaDL".freeze
+class Transmission
+  def initialize(uri, log:)
+    uri = Utils.merge_uri uri, "/transmission/rpc"
+    @http = Utils::SimpleHTTP.new uri, json: true, log: log
+  end
+
+  def torrents
+    req("torrent-get", fields: Torrent::API_FIELDS).
+      fetch("torrents").
+      map { Torrent.new _1 }
+  end
+
+  def default_dir_free
+    key = "download-dir"
+    path = req("session-get", fields: [key]).fetch key
+    req("free-space", path: path).fetch "size-bytes"
+  end
+
+  def delete_perm(ids)
+    req "torrent-remove", ids: ids, "delete-local-data" => true
+  end
+
+  private def req(method, arguments)
+    @sess_id ||= @http.get("", expect: [Net::HTTPConflict], json: false).
+      []('X-Transmission-Session-Id') \
+      or raise "missing session ID"
+    res = @http.post("", {method: method, arguments: arguments},
+      expect: [Net::HTTPOK]
+    ) do |req|
+      req['X-Transmission-Session-Id'] = @sess_id
+    end
+    res.fetch("result").then do |s|
+      s == "success" or raise "unexpected result: #{s}"
+    end
+    res.fetch "arguments"
   end
 end
 
@@ -275,11 +333,12 @@ if $0 == __FILE__
   config = Utils::Conf.new "config.yml"
   log = Utils::Log.new $stderr, level: :info
   log.level = :debug if ENV["DEBUG"] == "1"
-  dry_run = config["dry_run"]
-  qbt = URI config["qbt"]
+  dry_run = config[:dry_run]
+  client = Transmission.new URI(config[:transmission]),
+    log: log["Transmission"]
   pvrs = config[:pvrs].to_hash.map do |name, url|
     Utils::PVR.const_get(name).new(URI(url), log: log[name])
   end
-  app = App.new qbt, pvrs: pvrs, dry_run: dry_run, log: log
+  app = App.new client, pvrs: pvrs, dry_run: dry_run, log: log
   MetaCLI.new(ARGV).run app
 end
