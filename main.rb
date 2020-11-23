@@ -25,7 +25,16 @@ class App
     @log.info "freed %s by deleting %d torrents" \
       % [Utils::Fmt.size(cleaner.freed), cleaner.deleted_count]
     @log.info "marked %d torrents as failed" % [cleaner.failed_count]
+
+    @log[SPEED_LIMITS].info "setting speed limits" do
+      @client.set_speed_limits **SPEED_LIMITS
+    end
   end
+
+  SPEED_LIMITS = {
+    up: 12500,
+    down: 12500,
+  }.freeze
 end
 
 class Cleaner
@@ -290,6 +299,7 @@ class SeedStats
   end
 end
 
+# https://github.com/transmission/transmission/blob/master/extras/rpc-spec.txt
 class Transmission
   def initialize(uri, log:)
     uri = Utils.merge_uri uri, "/transmission/rpc"
@@ -310,6 +320,15 @@ class Transmission
 
   def delete_perm(ids)
     req "torrent-remove", ids: ids, "delete-local-data" => true
+  end
+
+  def set_speed_limits(up:, down:)
+    args = {}
+    %i[up down].each do |var|
+      args["speed-limit-#{var}-enabled"] = true
+      args["speed-limit-#{var}"] = eval(var.to_s)
+    end
+    req "session-set", args
   end
 
   private def req(method, arguments)
