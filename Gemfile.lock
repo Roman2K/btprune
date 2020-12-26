@@ -6,9 +6,10 @@ GIT
 
 GIT
   remote: https://github.com/Roman2K/utils-ruby.git
-  revision: 0e8e8a0d1c2e77967dade0f20317a02d6752b66f
+  revision: 22161bd33e697fe22b827665de6b7bc10f3c08e5
   specs:
     utils-ruby (0.1.0)
+      net_http_unix (~> 0.2)
 
 GEM
   remote: https://rubygems.org/
@@ -16,6 +17,7 @@ GEM
     coderay (1.1.2)
     method_source (0.9.2)
     minitest (5.14.0)
+    net_http_unix (0.2.2)
     pry (0.12.2)
       coderay (~> 1.1.0)
       method_source (~> 0.9.0)

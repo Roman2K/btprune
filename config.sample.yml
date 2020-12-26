@@ -1,3 +1,0 @@
-qbt: "http://USER:PASSWORD@qbt.home"
-radarr: "http://radarr.home/api?apikey=API_KEY"
-sonarr: "http://sonarr.home/api?apikey=API_KEY"

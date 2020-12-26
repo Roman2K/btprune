@@ -10,6 +10,10 @@ class App
   end
 
   def cmd_prune
+    @log[SPEED_LIMITS].info "setting speed limits" do
+      @client.set_speed_limits **SPEED_LIMITS
+    end
+
     categories = {
       "lidarr" => nil,
       "uncat_ok" => :imported,
@@ -25,10 +29,6 @@ class App
     @log.info "freed %s by deleting %d torrents" \
       % [Utils::Fmt.size(cleaner.freed), cleaner.deleted_count]
     @log.info "marked %d torrents as failed" % [cleaner.failed_count]
-
-    @log[SPEED_LIMITS].info "setting speed limits" do
-      @client.set_speed_limits **SPEED_LIMITS
-    end
   end
 
   SPEED_LIMITS = {
@@ -107,9 +107,11 @@ class Cleaner
     end
 
     pvr.history_events.each do |ev|
+      # Torrent hash may be nil while loading metadata
       t = (cl = ev.fetch("data")["downloadClient"]&.downcase \
         and cl == 'transmission' \
-        and tors.delete(ev.fetch("downloadId").downcase)) or next
+        and id = ev["downloadId"] \
+        and tors.delete(id.downcase)) or next
       t.status =
         case ev.fetch("eventType")
         when "grabbed" then :grabbed
@@ -158,17 +160,12 @@ class Cleaner
       seed_score: Fmt.score(seeding),
     ]
 
-    if should_free
-      log.debug "should free up space"
-    else
-      return
-    end
+    should_free or return
+    log.debug "should free up space"
 
     case t.status
     when :imported
-      log.info "imported, deleting" do
-        delete t
-      end
+      log.info("imported, deleting") { delete t }
     else
       log.error "unhandled status, not deleting"
     end
@@ -182,7 +179,8 @@ class Cleaner
 
   private def mark_failed(t, log:)
     qid = @queues[t.pvr].find { |item|
-      item.fetch("downloadId").downcase == t.hash_string.downcase
+      id = item["downloadId"] \
+        and id.downcase == t.hash_string.downcase
     }&.fetch "id"
 
     unless qid
@@ -272,7 +270,7 @@ class SeedStats
 
     @state = t.state
     @progress = t.progress
-    @ratio = t.ratio
+    @ratio = [t.ratio, 0].max
 
     now = Time.now
     @added_time = now - Time.at(t.added_on)
@@ -356,7 +354,7 @@ if $0 == __FILE__
   client = Transmission.new URI(config[:transmission]),
     log: log["Transmission"]
   pvrs = config[:pvrs].to_hash.map do |name, url|
-    Utils::PVR.const_get(name).new(URI(url), log: log[name])
+    Utils::PVR.const_get(name).new(URI(url), batch_size: 100, log: log[name])
   end
   app = App.new client, pvrs: pvrs, dry_run: dry_run, log: log
   MetaCLI.new(ARGV).run app
