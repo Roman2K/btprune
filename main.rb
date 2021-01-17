@@ -10,10 +10,6 @@ class App
   end
 
   def cmd_prune
-    @log[SPEED_LIMITS].info "setting speed limits" do
-      @client.set_speed_limits **SPEED_LIMITS
-    end
-
     categories = {
       "lidarr" => nil,
       "uncat_ok" => :imported,
@@ -30,11 +26,12 @@ class App
       % [Utils::Fmt.size(cleaner.freed), cleaner.deleted_count]
     @log.info "marked %d torrents as failed" % [cleaner.failed_count]
   end
+end
 
-  SPEED_LIMITS = {
-    up: 12500,
-    down: 12500,
-  }.freeze
+class Torrent < BasicObject
+  def initialize(t); @t = t end
+  private def method_missing(m,*a,&b); @t.public_send m,*a,&b end
+  attr_accessor :log, :status, :pvr
 end
 
 class Cleaner
@@ -50,10 +47,11 @@ class Cleaner
 
   attr_reader :freed, :deleted_count, :failed_count
 
-  MAX_DISK_USE = 300 * (1024 ** 3)
+  MAX_DISK_USE = 200 * (1024 ** 3)
 
   def clean
     torrents = @client.torrents.map do |t|
+      t = Torrent.new t
       cat = t.cat
       cat = "[no category]" if cat.empty?
       t.log = @log[cat, torrent: t.name]
@@ -66,16 +64,19 @@ class Cleaner
       % [init_used, MAX_DISK_USE].map { Utils::Fmt.size _1 }
 
     prev_used = nil
+    is_over_max = ->{ (init_used - @freed) >= MAX_DISK_USE }
     torrents.
       map { |t| [t, SeedStats.new(t)] }.
       sort_by { |t, st| -st.ratio }.
       each { |t, st|
-        may_delete t, st, should_free: (init_used - @freed) >= MAX_DISK_USE
+        may_delete t, st, should_free: is_over_max.()
         if (used = init_used - @freed) != prev_used
           @log.info "used after deletes: #{Utils::Fmt.size used}"
           prev_used = used
         end
       }
+
+    @log.error "failed to free enough disk space" if is_over_max.()
   end
 
   private def assign_statuses!(tors)
@@ -100,8 +101,6 @@ class Cleaner
       return
     end
 
-    oldest = tors.map { |t| t.added_on }.min or return
-
     tors = tors.each_with_object({}) do |t,h|
       h[t.hash_string.downcase] = t
     end
@@ -109,7 +108,7 @@ class Cleaner
     pvr.history_events.each do |ev|
       # Torrent hash may be nil while loading metadata
       t = (cl = ev.fetch("data")["downloadClient"]&.downcase \
-        and cl == 'transmission' \
+        and %w[qbittorrent qbt transmission].include?(cl.downcase) \
         and id = ev["downloadId"] \
         and tors.delete(id.downcase)) or next
       t.status =
@@ -117,7 +116,7 @@ class Cleaner
         when "grabbed" then :grabbed
         when "downloadFolderImported" then :imported
         end
-      break if tors.empty? || Time.parse(ev.fetch "date") < oldest
+      break if tors.empty?
     end
   end
 
@@ -172,7 +171,7 @@ class Cleaner
   end
 
   private def delete(t)
-    real_mode { @client.delete_perm [t.hash_string] }
+    real_mode { @client.delete_perm [t] }
     @deleted_count += 1
     @freed += t.size
   end
@@ -220,46 +219,6 @@ class Cleaner
   end
 end
 
-class Torrent
-  STATUSES = {
-    0 => :stopped,
-    1 => :check_wait,
-    2 => :check,
-    3 => :download_wait,
-    4 => :download,
-    5 => :seed_wait,
-    6 => :seed,
-  }.freeze
-
-  API_FIELDS = %w[
-    hashString name downloadDir totalSize status addedDate doneDate percentDone
-    uploadRatio desiredAvailable
-  ]
-
-  def initialize(data); @data = data end
-  attr_accessor :log, :status, :pvr
-
-  def name; @data.fetch "name" end
-  def cat; File.basename @data.fetch("downloadDir") end
-  def hash_string; @data.fetch "hashString" end
-  def size; @data.fetch "totalSize" end
-  def state; STATUSES.fetch @data.fetch "status" end
-  def added_on; Time.at @data.fetch "addedDate" end
-  def completion_on; Time.at @data.fetch "doneDate" end
-  def progress; @data.fetch "percentDone" end
-  def ratio; @data.fetch "uploadRatio" end
-
-  def attrs
-    {}.tap do |h|
-      %i[ name cat hash_string size state added_on completion_on progress
-          ratio ].each \
-      do |k|
-        h[k] = public_send k
-      end
-    end
-  end
-end
-
 class SeedStats
   DEFAULT_DL_TIME_LIMIT = 4 * 24 * 3600
   DEFAULT_DL_GRACE = 1 * 3600
@@ -281,67 +240,19 @@ class SeedStats
   end
 
   private def compute_health_score
-    unless @progress < 1 && %i[download_wait download stopped].include?(@state)
+    unless @progress < 1 && %w[stalledDL metaDL].include?(@state)
       return 1
     end
     [1 - (@added_time - @dl_grace) / @dl_time_limit, 0].max + @progress * 2
   end
 
   attr_reader \
-    :state, :progress, :ratio,
+    :progress, :ratio,
     :added_time, :seed_time, :health, :seeding
 
   Score = Struct.new :num do
     def to_f; num.to_f end
     def ok; num >= 1 end
-  end
-end
-
-# https://github.com/transmission/transmission/blob/master/extras/rpc-spec.txt
-class Transmission
-  def initialize(uri, log:)
-    uri = Utils.merge_uri uri, "/transmission/rpc"
-    @http = Utils::SimpleHTTP.new uri, json: true, log: log
-  end
-
-  def torrents
-    req("torrent-get", fields: Torrent::API_FIELDS).
-      fetch("torrents").
-      map { Torrent.new _1 }
-  end
-
-  def default_dir_free
-    key = "download-dir"
-    path = req("session-get", fields: [key]).fetch key
-    req("free-space", path: path).fetch "size-bytes"
-  end
-
-  def delete_perm(ids)
-    req "torrent-remove", ids: ids, "delete-local-data" => true
-  end
-
-  def set_speed_limits(up:, down:)
-    args = {}
-    %i[up down].each do |var|
-      args["speed-limit-#{var}-enabled"] = true
-      args["speed-limit-#{var}"] = eval(var.to_s)
-    end
-    req "session-set", args
-  end
-
-  private def req(method, arguments)
-    @sess_id ||= @http.get("", expect: [Net::HTTPConflict], json: false).
-      []('X-Transmission-Session-Id') \
-      or raise "missing session ID"
-    res = @http.post("", {method: method, arguments: arguments},
-      expect: [Net::HTTPOK]
-    ) do |req|
-      req['X-Transmission-Session-Id'] = @sess_id
-    end
-    res.fetch("result").then do |s|
-      s == "success" or raise "unexpected result: #{s}"
-    end
-    res.fetch "arguments"
   end
 end
 
@@ -351,8 +262,7 @@ if $0 == __FILE__
   log = Utils::Log.new $stderr, level: :info
   log.level = :debug if ENV["DEBUG"] == "1"
   dry_run = config[:dry_run]
-  client = Transmission.new URI(config[:transmission]),
-    log: log["Transmission"]
+  client = Utils::QBitTorrent.new URI(config[:qbt]), log: log["qbt"]
   pvrs = config[:pvrs].to_hash.map do |name, url|
     Utils::PVR.const_get(name).new(URI(url), batch_size: 100, log: log[name])
   end
