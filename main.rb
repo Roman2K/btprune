@@ -11,7 +11,6 @@ class App
 
   def cmd_prune
     categories = {
-      "lidarr" => nil,
       "uncat_ok" => :imported,
       "" => nil,
     }
@@ -21,6 +20,7 @@ class App
 
     cleaner = Cleaner.new @client, categories, dry_run: @dry_run, log: @log
     cleaner.clean
+    cleaner.prevent_quota_overage
 
     @log.info "freed %s by deleting %d torrents" \
       % [Utils::Fmt.size(cleaner.freed), cleaner.deleted_count]
@@ -47,7 +47,35 @@ class Cleaner
 
   attr_reader :freed, :deleted_count, :failed_count
 
-  MAX_DISK_USE = 200 * (1024 ** 3)
+  MAX_QUOTA = 200 * (1024 ** 3)
+
+  def prevent_quota_overage
+    torrents = @client.torrents
+    free = MAX_QUOTA
+    pause, resume = [], []
+    torrents.sort_by { -_1.progress }.each do |t|
+      free -= t.size
+      next unless t.progress < 1
+      if free < 0
+        @log[
+          t: t.name,
+          overage: "%s of %s" % [-free, MAX_QUOTA].map { Utils::Fmt.size _1 },
+        ].info "should pause to prevent quota overage"
+        pause
+      else
+        resume
+      end << t
+    end
+    resume = pause[0,1] if resume.empty?
+    resume.reject! &:downloading?
+    pause.select! &:downloading?
+    @log.info "pausing #{pause.size} torrents" do
+      @client.pause pause
+    end
+    @log.info "resuming #{resume.size} torrents" do
+      @client.resume resume
+    end
+  end
 
   def clean
     torrents = @client.torrents.map do |t|
@@ -59,12 +87,12 @@ class Cleaner
     end
     assign_statuses! torrents
 
-    init_used = torrents.sum &:size
+    init_used = torrents.sum { |t| t.size * t.progress }
     @log.info "used: %s of %s" \
-      % [init_used, MAX_DISK_USE].map { Utils::Fmt.size _1 }
+      % [init_used, MAX_QUOTA].map { Utils::Fmt.size _1 }
 
     prev_used = nil
-    is_over_max = ->{ (init_used - @freed) >= MAX_DISK_USE }
+    is_over_max = ->{ (init_used - @freed) >= MAX_QUOTA }
     torrents.
       map { |t| [t, SeedStats.new(t)] }.
       sort_by { |t, st| -st.ratio }.
@@ -134,14 +162,13 @@ class Cleaner
 
     log = log[progress: Fmt.progress(st.progress), ratio: Fmt.ratio(st.ratio)]
 
-    health = st.health
     dl_log = -> { log[
       torrent_state: t.state,
       added_time: Fmt.duration(st.added_time),
-      health: Fmt.score(health),
+      health: Fmt.score(st.health),
     ] }
 
-    if !health.ok
+    if !st.health.ok
       dl_log.().info "low health, marking as failed" do
         mark_failed t, log: log
       end
@@ -153,11 +180,15 @@ class Cleaner
       return
     end
 
-    seeding = st.seeding
     log = log[
       seed_time: st.seed_time.then { |t| t ? Fmt.duration(t) : "?" },
-      seed_score: Fmt.score(seeding),
+      seed_score: Fmt.score(st.seeding),
     ]
+
+    if !st.seeding.ok
+      log.info "still seeding"
+      return
+    end
 
     should_free or return
     log.debug "should free up space"
@@ -178,8 +209,7 @@ class Cleaner
 
   private def mark_failed(t, log:)
     qid = @queues[t.pvr].find { |item|
-      id = item["downloadId"] \
-        and id.downcase == t.hash_string.downcase
+      id = item["downloadId"] and id.downcase == t.hash_string.downcase
     }&.fetch "id"
 
     unless qid
@@ -236,8 +266,15 @@ class SeedStats
     @seed_time = (now - Time.at(t.completion_on) if @progress >= 1)
 
     @health = Score.new compute_health_score
-    @seeding = Score.new @ratio
+    @seeding = Score.new self.class.compute_seeding_score(t)
   end
+
+  def self.compute_seeding_score(t)
+    [(MIN_SEED_MAX_SIZE * MIN_SEED_RATIO).to_f / t.size, 10].min
+  end
+
+  MIN_SEED_RATIO = 10
+  MIN_SEED_MAX_SIZE = 15 * 1024**3
 
   private def compute_health_score
     unless @progress < 1 && %w[stalledDL metaDL].include?(@state)
