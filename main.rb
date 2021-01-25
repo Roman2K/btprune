@@ -54,12 +54,12 @@ class Cleaner
     free = MAX_QUOTA
     pause, resume = [], []
     torrents.sort_by { -_1.progress }.each do |t|
-      free -= t.size
+      free -= t.size * t.progress
       next unless t.progress < 1
       if free < 0
         @log[
           t: t.name,
-          overage: "%s of %s" % [-free, MAX_QUOTA].map { Utils::Fmt.size _1 },
+          overage: "%s over %s" % [-free, MAX_QUOTA].map { Utils::Fmt.size _1 },
         ].info "should pause to prevent quota overage"
         pause
       else
@@ -70,10 +70,10 @@ class Cleaner
     resume.reject! &:downloading?
     pause.select! &:downloading?
     @log.info "pausing #{pause.size} torrents" do
-      @client.pause pause
+      real_mode { @client.pause pause }
     end
     @log.info "resuming #{resume.size} torrents" do
-      @client.resume resume
+      real_mode { @client.resume resume }
     end
   end
 
@@ -164,7 +164,7 @@ class Cleaner
 
     dl_log = -> { log[
       torrent_state: t.state,
-      added_time: Fmt.duration(st.added_time),
+      time_active: Fmt.duration(st.time_active),
       health: Fmt.score(st.health),
     ] }
 
@@ -250,42 +250,42 @@ class Cleaner
 end
 
 class SeedStats
-  DEFAULT_DL_TIME_LIMIT = 4 * 24 * 3600
-  DEFAULT_DL_GRACE = 1 * 3600
-
   def initialize(t)
-    @dl_time_limit = DEFAULT_DL_TIME_LIMIT
-    @dl_grace = DEFAULT_DL_GRACE
-
     @state = t.state
     @progress = t.progress
     @ratio = [t.ratio, 0].max
 
     now = Time.now
-    @added_time = now - Time.at(t.added_on)
+    @time_active = t.time_active
     @seed_time = (now - Time.at(t.completion_on) if @progress >= 1)
 
     @health = Score.new compute_health_score
-    @seeding = Score.new self.class.compute_seeding_score(t)
-  end
-
-  def self.compute_seeding_score(t)
-    [(MIN_SEED_MAX_SIZE * MIN_SEED_RATIO).to_f / t.size, 10].min
+    @seeding = Score.new \
+      self.class.compute_seeding_score(@ratio, @time_active, t.size)
   end
 
   MIN_SEED_RATIO = 10
   MIN_SEED_MAX_SIZE = 15 * 1024**3
+  SEED_TIME_LIMIT = 4 * 86400
+
+  def self.compute_seeding_score(ratio, time_active, size)
+    target = ((MIN_SEED_MAX_SIZE * MIN_SEED_RATIO).to_f / size).clamp(1, 10)
+    [ratio.to_f / target, time_active.to_f / SEED_TIME_LIMIT].max
+  end
+
+  DL_TIME_LIMIT = 1 * 86400
+  DL_GRACE = 2 * 3600
 
   private def compute_health_score
     unless @progress < 1 && %w[stalledDL metaDL].include?(@state)
       return 1
     end
-    [1 - (@added_time - @dl_grace) / @dl_time_limit, 0].max + @progress * 2
+    [2 - [@time_active - DL_GRACE, 0].max / DL_TIME_LIMIT + @progress, 0].max
   end
 
   attr_reader \
     :progress, :ratio,
-    :added_time, :seed_time, :health, :seeding
+    :time_active, :seed_time, :health, :seeding
 
   Score = Struct.new :num do
     def to_f; num.to_f end
