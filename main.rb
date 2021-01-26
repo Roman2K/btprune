@@ -47,13 +47,24 @@ class Cleaner
 
   attr_reader :freed, :deleted_count, :failed_count
 
+  private def real_mode
+    yield unless @dry_run
+  end
+
   MAX_QUOTA = 200 * (1024 ** 3)
 
   def prevent_quota_overage
     torrents = @client.torrents
     free = MAX_QUOTA
-    pause, resume = [], []
-    torrents.sort_by { -_1.progress }.each do |t|
+    r = Resumes.new
+    torrents.sort_by { |t|
+      [ case
+        when t.progress >= 0 then 0
+        when t.downloading? then 1
+        else 2
+        end,
+        -t.progress ]
+    }.each do |t|
       free -= t.size * t.progress
       next unless t.progress < 1
       if free < 0
@@ -61,19 +72,18 @@ class Cleaner
           t: t.name,
           overage: "%s over %s" % [-free, MAX_QUOTA].map { Utils::Fmt.size _1 },
         ].info "should pause to prevent quota overage"
-        pause
+        r.pause
       else
-        resume
+        r.resume
       end << t
     end
-    resume = pause[0,1] if resume.empty?
-    resume.reject! &:downloading?
-    pause.select! &:downloading?
-    @log.info "pausing #{pause.size} torrents" do
-      real_mode { @client.pause pause }
+    r.optimize!
+
+    @log.info "pausing #{r.pause.size} torrents" do
+      real_mode { @client.pause r.pause }
     end
-    @log.info "resuming #{resume.size} torrents" do
-      real_mode { @client.resume resume }
+    @log.info "resuming #{r.resume.size} torrents" do
+      real_mode { @client.resume r.resume }
     end
   end
 
@@ -226,10 +236,6 @@ class Cleaner
     end
   end
 
-  private def real_mode
-    yield unless @dry_run
-  end
-
   module Fmt
     def self.duration(*args, &block)
       Utils::Fmt.duration *args, &block
@@ -246,6 +252,29 @@ class Cleaner
     def self.score(s)
       "%s:%s" % [progress(s.to_f), s.ok ? "OK" : "!!"]
     end
+  end
+end
+
+class Resumes
+  def initialize
+    @pause, @resume = [], []
+  end
+
+  attr_reader :pause, :resume
+
+  def optimize!
+    @resume, @pause[0,1] = @pause[0,1], [] if @resume.empty?
+    backup = @pause.select { _1.state != 'stalledDL' }.shuffle
+    @resume.each_with_index do |t, idx|
+      if t.state == 'stalledDL' && o = backup.shift
+        @resume[idx] = o
+        @pause.delete(o) or raise
+        @pause << t
+      end
+    end
+    @resume.reject! &:downloading?
+    @pause.select! &:downloading?
+    self
   end
 end
 
