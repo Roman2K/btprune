@@ -65,7 +65,7 @@ class Cleaner
         end,
         -t.progress ]
     }.each do |t|
-      free -= t.size * t.progress
+      free -= t.size
       next unless t.progress < 1
       if free < 0
         @log[
@@ -139,22 +139,46 @@ class Cleaner
       return
     end
 
-    tors = tors.each_with_object({}) do |t,h|
-      h[t.hash_string.downcase] = t
-    end
+    tors = tors.each_with_object({}) { |t,h| h[t.hash_string.downcase] = t }
+    statuses = {}
+    events = pvr.history_events
 
-    pvr.history_events.each do |ev|
+    until tors.empty?
+      ev = begin
+        events.next
+      rescue StopIteration
+        break
+      end
+      ev = Utils::PVR::Event.of_pvr(pvr, ev)
+      ev.group_key.then do |key|
+        date = Time.parse(ev.fetch("date"))
+        info = statuses[key]
+        source_title = ev.fetch "sourceTitle"
+        st =
+          case ev.fetch("eventType")
+          when "downloadFolderImported" then :imported
+          when "grabbed" then :grabbed
+          end
+        if !info || (
+          info.fetch(:date) < date \
+            && (source_title == info.fetch(:source_title) || st == :grabbed)
+        ) then
+          info = statuses[key] = {
+            date: date,
+            status: st,
+            source_title: source_title,
+          }
+        end
+        info
+      end
       # Torrent hash may be nil while loading metadata
       t = (cl = ev.fetch("data")["downloadClient"]&.downcase \
         and %w[qbittorrent qbt transmission].include?(cl.downcase) \
         and id = ev["downloadId"] \
         and tors.delete(id.downcase)) or next
-      t.status =
-        case ev.fetch("eventType")
-        when "grabbed" then :grabbed
-        when "downloadFolderImported" then :imported
-        end
-      break if tors.empty?
+      t.status = statuses.values_at(*ev.group_keys).compact.
+        sort_by { _1.fetch(:date) }.
+        fetch(-1).fetch :status
     end
   end
 
