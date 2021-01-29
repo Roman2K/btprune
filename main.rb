@@ -314,16 +314,18 @@ class SeedStats
 
     @health = Score.new compute_health_score
     @seeding = Score.new \
-      self.class.compute_seeding_score(@ratio, @time_active, t.size)
+      self.class.compute_seeding_score(@ratio, @seed_time, t.size)
   end
 
   MIN_SEED_RATIO = 10
   MIN_SEED_MAX_SIZE = 15 * 1024**3
   SEED_TIME_LIMIT = 4 * 86400
 
-  def self.compute_seeding_score(ratio, time_active, size)
+  def self.compute_seeding_score(ratio, seed_time, size)
     target = ((MIN_SEED_MAX_SIZE * MIN_SEED_RATIO).to_f / size).clamp(1, 10)
-    [ratio.to_f / target, time_active.to_f / SEED_TIME_LIMIT].max
+    scores = [ratio.to_f / target]
+    scores << (seed_time.to_f / SEED_TIME_LIMIT) if seed_time
+    scores.max
   end
 
   DL_TIME_LIMIT = 1 * 86400
