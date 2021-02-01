@@ -71,7 +71,7 @@ class Cleaner
         @log[
           t: t.name,
           overage: "%s over %s" % [-free, MAX_QUOTA].map { Utils::Fmt.size _1 },
-        ].info "should pause to prevent quota overage"
+        ].debug "should pause to prevent quota overage"
         r.pause
       else
         r.resume
@@ -210,7 +210,7 @@ class Cleaner
     end
 
     if st.progress < 1
-      dl_log.().info "still downloading"
+      dl_log.().debug "still downloading"
       return
     end
 
@@ -220,7 +220,7 @@ class Cleaner
     ]
 
     if !st.seeding.ok
-      log.info "still seeding"
+      log.debug "still seeding"
       return
     end
 
@@ -317,9 +317,9 @@ class SeedStats
       self.class.compute_seeding_score(@ratio, @seed_time, t.size)
   end
 
-  MIN_SEED_RATIO = 10
+  MIN_SEED_RATIO = 5
   MIN_SEED_MAX_SIZE = 15 * 1024**3
-  SEED_TIME_LIMIT = 4 * 86400
+  SEED_TIME_LIMIT = 2 * 86400
 
   def self.compute_seeding_score(ratio, seed_time, size)
     target = ((MIN_SEED_MAX_SIZE * MIN_SEED_RATIO).to_f / size).clamp(1, 10)
