@@ -31,7 +31,7 @@ end
 class Torrent < BasicObject
   def initialize(t); @t = t end
   private def method_missing(m,*a,&b); @t.public_send m,*a,&b end
-  attr_accessor :log, :status, :pvr
+  attr_accessor :log, :status, :pvr, :download_client_id
 end
 
 class Cleaner
@@ -47,8 +47,8 @@ class Cleaner
 
   attr_reader :freed, :deleted_count, :failed_count
 
-  private def real_mode
-    yield unless @dry_run
+  private def real_mode(ret=nil)
+    @dry_run ? ret : yield
   end
 
   MAX_QUOTA = 200 * (1024 ** 3)
@@ -87,15 +87,18 @@ class Cleaner
     end
   end
 
-  def clean
-    torrents = @client.torrents.map do |t|
+  private def fetch_torrents
+    @client.torrents.map { |t|
       t = Torrent.new t
       cat = t.cat
       cat = "[no category]" if cat.empty?
       t.log = @log[cat, torrent: t.name]
       t
-    end
-    assign_statuses! torrents
+    }.tap { assign_statuses! _1 }
+  end
+
+  def clean
+    torrents = fetch_torrents
 
     init_used = torrents.sum { |t| t.size * t.progress }
     @log.info "used: %s of %s" \
@@ -107,14 +110,49 @@ class Cleaner
       map { |t| [t, SeedStats.new(t)] }.
       sort_by { |t, st| -st.ratio }.
       each { |t, st|
-        may_delete t, st, should_free: is_over_max.()
+        ok = may_delete t, st, should_free: is_over_max.()
         if (used = init_used - @freed) != prev_used
           @log.info "used after deletes: #{Utils::Fmt.size used}"
           prev_used = used
         end
+        torrents.delete t or raise if ok
       }
 
     @log.error "failed to free enough disk space" if is_over_max.()
+
+    force_imports torrents
+  end
+
+  IMPORT_ROOT_MAP_FROM = Pathname "/downloads"
+  IMPORT_ROOT_MAP_TO = Pathname "/torrents"
+
+  private def force_imports(torrents)
+    torrents = torrents.select { |t| t.progress >= 1 && t.status == :grabbed }
+    return if torrents.empty?
+    running = Hash.new do |h, pvr|
+      h[pvr] = pvr.commands.
+        select { |c| c.fetch("name") == pvr.class::CMD_DOWNLOADED_SCAN }.
+        sort_by { |c| c.fetch("started") }
+    end
+    torrents.each do |t|
+      log = t.log["import"]
+      path = Pathname(t.path).relative_path_from(IMPORT_ROOT_MAP_FROM).
+        tap { _1.descend.first.to_s != '..' or raise "unexpected root" }.
+        then { IMPORT_ROOT_MAP_TO.join _1 }
+      log[path: path].info "should force import"
+      if cmd = running[t.pvr].
+        find { _1.fetch("body").fetch("path") == path.to_s }
+      then
+        log[id: cmd.fetch("id")].info "found running command"
+        next
+      end
+      cmd = real_mode "id" => "[dry run]" do
+        t.pvr.downloaded_scan path.to_s,
+          download_client_id: t.download_client_id, import_mode: :copy
+      end
+      log[id: cmd.fetch("id"), download_client_id: t.download_client_id].
+        info "started command"
+    end
   end
 
   private def assign_statuses!(tors)
@@ -176,6 +214,7 @@ class Cleaner
         and %w[qbittorrent qbt transmission].include?(cl.downcase) \
         and id = ev["downloadId"] \
         and tors.delete(id.downcase)) or next
+      t.download_client_id = id
       t.status = statuses.values_at(*ev.group_keys).compact.
         sort_by { _1.fetch(:date) }.
         fetch(-1).fetch :status
@@ -206,7 +245,7 @@ class Cleaner
       dl_log.().info "low health, marking as failed" do
         mark_failed t, log: log
       end
-      return
+      return true
     end
 
     if st.progress < 1
@@ -230,9 +269,12 @@ class Cleaner
     case t.status
     when :imported
       log.info("imported, deleting") { delete t }
+      return true
     else
       log.error "unhandled status, not deleting"
     end
+
+    false
   end
 
   private def delete(t)
