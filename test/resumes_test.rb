@@ -2,19 +2,23 @@ require 'minitest/autorun'
 require_relative '../main'
 
 class ResumesTest < Minitest::Test
+  ST_STALLED = Resumes::STATE_STALLED
+  ST_PAUSED = 'pausedDL'
+  ST_DL = 'DL'
+
   def test_optimize
-    r = Resumes.new
+    r = Resumes.new 1
     r.pause.concat [
-      Tor[id: 'pa', downloading?: true, state: 'stalledDL'],
-      Tor[id: 'pb', downloading?: false, state: 'stalledDL'],
-      Tor[id: 'pc', downloading?: false, state: 'pausedDL'],
-      Tor[id: 'pd', downloading?: false, state: 'stalledDL'],
+      Tor[id: 'pa', downloading?: true, state: ST_STALLED],
+      Tor[id: 'pb', downloading?: false, state: ST_STALLED],
+      Tor[id: 'pc', downloading?: false, state: ST_PAUSED],
+      Tor[id: 'pd', downloading?: false, state: ST_STALLED],
     ]
     r.resume.concat [
-      Tor[id: 'ra', downloading?: false, state: 'DL'],
-      Tor[id: 'rb', downloading?: true, state: 'DL'],
-      Tor[id: 'rc', downloading?: true, state: 'stalledDL'],
-      Tor[id: 'rd', downloading?: true, state: 'stalledDL'],
+      Tor[id: 'ra', downloading?: false, state: ST_DL],
+      Tor[id: 'rb', downloading?: true, state: ST_DL],
+      Tor[id: 'rc', downloading?: true, state: ST_STALLED],
+      Tor[id: 'rd', downloading?: true, state: ST_STALLED],
     ]
     r.optimize!
 

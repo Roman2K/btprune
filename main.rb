@@ -54,22 +54,25 @@ class Cleaner
   MAX_QUOTA = 200 * (1024 ** 3)
 
   def prevent_quota_overage
+    log = @log["quota"]
     torrents = @client.torrents
-    free = MAX_QUOTA
-    r = Resumes.new
-    torrents.sort_by { |t|
-      [ case
-        when t.progress >= 0 then 0
-        when t.downloading? then 1
-        else 2
-        end,
-        -t.progress ]
-    }.each do |t|
-      free -= t.size
-      next unless t.progress < 1
+    free = MAX_QUOTA - torrents.sum { |t| t.size * t.progress }
+    if free >= 0
+      [:info, "remaining: %s of %s", free]
+    else
+      [:warn, "overage: %s over %s", -free]
+    end.then do |lvl, msg, sz| 
+      log.public_send lvl, msg % [sz, MAX_QUOTA].map { Utils::Fmt.size _1 }
+    end
+    dling = torrents.select { _1.progress < 1 }
+    r = Resumes.new(torrents.size - dling.size > 0 ? 0 : 1)
+    dling.sort_by { -_1.progress }.each do |t|
+      rem = t.size * (1 - t.progress)
+      free -= rem
       if free < 0
-        @log[
+        log[
           t: t.name,
+          rem: Utils::Fmt.size(rem),
           overage: "%s over %s" % [-free, MAX_QUOTA].map { Utils::Fmt.size _1 },
         ].debug "should pause to prevent quota overage"
         r.pause
@@ -87,18 +90,14 @@ class Cleaner
     end
   end
 
-  private def fetch_torrents
-    @client.torrents.map { |t|
+  def clean
+    torrents = @client.torrents.map { |t|
       t = Torrent.new t
       cat = t.cat
       cat = "[no category]" if cat.empty?
       t.log = @log[cat, torrent: t.name]
       t
     }.tap { assign_statuses! _1 }
-  end
-
-  def clean
-    torrents = fetch_torrents
 
     init_used = torrents.sum { |t| t.size * t.progress }
     @log.info "used: %s of %s" \
@@ -241,6 +240,13 @@ class Cleaner
       health: Fmt.score(st.health),
     ] }
 
+    if err = queue_fatal_err(t)
+      dl_log.()[err: err].info "queue error, marking as failed" do
+        mark_failed t, log: log
+      end
+      return true
+    end
+
     if !st.health.ok
       dl_log.().info "low health, marking as failed" do
         mark_failed t, log: log
@@ -283,19 +289,31 @@ class Cleaner
     @freed += t.size
   end
 
-  private def mark_failed(t, log:)
-    qid = @queues[t.pvr].find { |item|
-      id = item["downloadId"] and id.downcase == t.hash_string.downcase
-    }&.fetch "id"
+  private def queue_fatal_err(t)
+    qit = queue_item(t) or return
+    qit.fetch("statusMessages").each do
+      msgs = _1.fetch "messages"
+      if msgs.any? /Unable to parse file/i
+        return msgs.join ", "
+      end
+    end
+    nil
+  end
 
-    unless qid
+  private def queue_item(t)
+    @queues[t.pvr].find do |item|
+      id = item["downloadId"] and id.downcase == t.hash_string.downcase
+    end
+  end
+
+  private def mark_failed(t, log:)
+    unless qid = queue_item(t)&.fetch("id")
       log[torrent_state: t.state].
         warn "item not found in PVR queue, deleting torrent" do
           delete t
         end
       return
     end
-
     log[queue_item: qid].debug "deleting from queue and blacklisting" do
       real_mode { t.pvr.queue_del qid, blacklist: true }
       @failed_count += 1
@@ -322,17 +340,20 @@ class Cleaner
 end
 
 class Resumes
-  def initialize
+  def initialize(min_dl)
+    @min_dl = min_dl
     @pause, @resume = [], []
   end
 
   attr_reader :pause, :resume
 
+  STATE_STALLED = 'stalledDL'
+
   def optimize!
-    @resume, @pause[0,1] = @pause[0,1], [] if @resume.empty?
-    backup = @pause.select { _1.state != 'stalledDL' }.shuffle
+    @resume, @pause[0,@min_dl] = @pause[0,@min_dl], [] if @resume.empty?
+    backup = @pause.select { _1.state != STATE_STALLED }.shuffle
     @resume.each_with_index do |t, idx|
-      if t.state == 'stalledDL' && o = backup.shift
+      if t.state == STATE_STALLED && o = backup.shift
         @resume[idx] = o
         @pause.delete(o) or raise
         @pause << t
