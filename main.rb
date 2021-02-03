@@ -265,7 +265,7 @@ class Cleaner
     ]
 
     if !st.seeding.ok
-      log.debug "still seeding"
+      log[seeding_info: st.seeding_info].debug "still seeding"
       return
     end
 
@@ -376,20 +376,15 @@ class SeedStats
     @seed_time = (now - Time.at(t.completion_on) if @progress >= 1)
 
     @health = Score.new compute_health_score
-    @seeding = Score.new \
-      self.class.compute_seeding_score(@ratio, @seed_time, t.size)
+    compute_seeding_score(t.size).then do |score, seeding_info|
+      @seeding = Score.new score
+      @seeding_info = seeding_info
+    end
   end
 
-  MIN_SEED_RATIO = 5
-  MIN_SEED_MAX_SIZE = 15 * 1024**3
-  SEED_TIME_LIMIT = 2 * 86400
-
-  def self.compute_seeding_score(ratio, seed_time, size)
-    target = ((MIN_SEED_MAX_SIZE * MIN_SEED_RATIO).to_f / size).clamp(1, 10)
-    scores = [ratio.to_f / target]
-    scores << (seed_time.to_f / SEED_TIME_LIMIT) if seed_time
-    scores.max
-  end
+  attr_reader \
+    :progress, :ratio,
+    :time_active, :seed_time, :health, :seeding, :seeding_info
 
   DL_TIME_LIMIT = 1 * 86400
   DL_GRACE = 2 * 3600
@@ -401,9 +396,18 @@ class SeedStats
     [2 - [@time_active - DL_GRACE, 0].max / DL_TIME_LIMIT + @progress, 0].max
   end
 
-  attr_reader \
-    :progress, :ratio,
-    :time_active, :seed_time, :health, :seeding
+  MIN_SEED_RATIO = 5
+  MIN_SEED_MAX_SIZE = 15 * 1024**3
+  SEED_TIME_LIMIT = 2 * 86400
+
+  private def compute_seeding_score(size)
+    target = MIN_SEED_RATIO
+    target *= [MIN_SEED_MAX_SIZE.to_f / size, 1].min
+    target = 1 if target < 1
+    scores = [@ratio.to_f / target]
+    scores << (@seed_time.to_f / SEED_TIME_LIMIT) if @seed_time
+    [scores.max, target_ratio: target]
+  end
 
   Score = Struct.new :num do
     def to_f; num.to_f end
