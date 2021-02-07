@@ -20,7 +20,6 @@ class App
 
     cleaner = Cleaner.new @client, categories, dry_run: @dry_run, log: @log
     cleaner.clean
-    cleaner.prevent_quota_overage
 
     @log.info "freed %s by deleting %d torrents" \
       % [Utils::Fmt.size(cleaner.freed), cleaner.deleted_count]
@@ -53,9 +52,9 @@ class Cleaner
 
   MAX_QUOTA = 200 * (1024 ** 3)
 
-  def prevent_quota_overage
+  private def prevent_quota_overage(torrents)
     log = @log["quota"]
-    torrents = @client.torrents
+    torrents = torrents.select &:pvr
     free = MAX_QUOTA - torrents.sum { |t| t.size * t.progress }
     if free >= 0
       [:info, "remaining: %s of %s", free]
@@ -120,6 +119,7 @@ class Cleaner
     @log.error "failed to free enough disk space" if is_over_max.()
 
     force_imports torrents
+    prevent_quota_overage torrents
   end
 
   IMPORT_ROOT_MAP_FROM = Pathname "/downloads"
@@ -188,25 +188,20 @@ class Cleaner
       end
       ev = Utils::PVR::Event.of_pvr(pvr, ev)
       ev.group_key.then do |key|
-        date = Time.parse(ev.fetch("date"))
         info = statuses[key]
-        source_title = ev.fetch "sourceTitle"
-        st =
-          case ev.fetch("eventType")
-          when "downloadFolderImported" then :imported
-          when "grabbed" then :grabbed
-          end
-        if !info || (
-          info.fetch(:date) < date \
-            && (source_title == info.fetch(:source_title) || st == :grabbed)
-        ) then
-          info = statuses[key] = {
-            date: date,
-            status: st,
-            source_title: source_title,
-          }
-        end
-        info
+        new_info = {
+          date: Time.parse(ev.fetch("date")),
+          source_title: ev.fetch("sourceTitle"),
+          status: \
+            case ev.fetch("eventType")
+            when "downloadFolderImported" then :imported
+            when "grabbed" then :grabbed
+            when "downloadFailed" then :dl_failed
+            else :unknown
+            end,
+        }
+        info = nil if info && newer_status_info?(new_info, info)
+        info || (statuses[key] = new_info)
       end
       # Torrent hash may be nil while loading metadata
       t = (cl = ev.fetch("data")["downloadClient"]&.downcase \
@@ -217,6 +212,17 @@ class Cleaner
       t.status = statuses.values_at(*ev.group_keys).compact.
         sort_by { _1.fetch(:date) }.
         fetch(-1).fetch :status
+    end
+  end
+
+  private def newer_status_info?(a,b)
+    more_recent = a.fetch(:date) > b.fetch(:date)
+    if a.fetch(:source_title) == b.fetch(:source_title)
+      more_recent
+    elsif more_recent
+      a.fetch(:status) == :grabbed
+    else
+      a.fetch(:status) == :imported && b.fetch(:status) != :grabbed
     end
   end
 
