@@ -102,13 +102,23 @@ class Cleaner
     @log.info "used: %s of %s" \
       % [init_used, MAX_QUOTA].map { Utils::Fmt.size _1 }
 
+    if aggressive_delete =
+      (seed_pct = torrents.count { |t| t.pvr && t.progress >= 1 }.to_f.
+        div torrents.size) < 0.01
+    then
+      @log[seed_pct: Utils::Fmt.pct(seed_pct)].
+        warn "few seeding torrents, deleting more aggressively"
+    end
+
     prev_used = nil
     is_over_max = ->{ (init_used - @freed) >= MAX_QUOTA }
     torrents.
       map { |t| [t, SeedStats.new(t)] }.
       sort_by { |t, st| -st.ratio }.
       each { |t, st|
-        ok = may_delete t, st, should_free: is_over_max.()
+        ok = may_delete t, st,
+          aggressive_delete: aggressive_delete,
+          should_free: is_over_max.()
         if (used = init_used - @freed) != prev_used
           @log.info "used after deletes: #{Utils::Fmt.size used}"
           prev_used = used
@@ -226,7 +236,7 @@ class Cleaner
     end
   end
 
-  def may_delete(t, st, should_free:)
+  def may_delete(t, st, should_free:, aggressive_delete:)
     log = t.log[status: t.status]
 
     case t.status
@@ -271,8 +281,13 @@ class Cleaner
     ]
 
     if !st.seeding.ok
-      log[seeding_info: st.seeding_info].debug "still seeding"
-      return
+      seed_log = log[seeding_info: st.seeding_info]
+      if aggressive_delete && st.seeding_stalled?
+        seed_log.warn "seeding stalled"
+      else
+        seed_log.debug "still seeding"
+        return
+      end
     end
 
     should_free or return
@@ -413,6 +428,12 @@ class SeedStats
     scores = [@ratio.to_f / target]
     scores << (@seed_time.to_f / SEED_TIME_LIMIT) if @seed_time
     [scores.max, target_ratio: target]
+  end
+
+  def seeding_stalled?
+    @state == 'stalledUP' && (@ratio >= 1 \
+      || @ratio.to_f / @seed_time < MIN_SEED_RATIO.to_f / SEED_TIME_LIMIT
+    )
   end
 
   Score = Struct.new :num do
