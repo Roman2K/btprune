@@ -65,6 +65,7 @@ class Cleaner
     end
     dling = torrents.select { _1.progress < 1 }
     r = Resumes.new(torrents.size - dling.size > 0 ? 0 : 1)
+    r.resume.concat (torrents - dling).select { _1.state == 'pausedUP' }
     dling.sort_by { -_1.progress }.each do |t|
       rem = t.size * (1 - t.progress)
       free -= rem
@@ -314,7 +315,7 @@ class Cleaner
     qit = queue_item(t) or return
     qit.fetch("statusMessages").each do
       msgs = _1.fetch "messages"
-      if msgs.any? /Unable to parse file/i
+      if msgs.any? /Unable to parse file|No files found/i
         return msgs.join ", "
       end
     end
