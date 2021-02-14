@@ -31,6 +31,11 @@ class Torrent < BasicObject
   def initialize(t); @t = t end
   private def method_missing(m,*a,&b); @t.public_send m,*a,&b end
   attr_accessor :log, :status, :pvr, :download_client_id
+  def rem
+    sz = @t.size
+    sz >= 0 or return
+    sz * (1 - @t.progress)
+  end
 end
 
 class Cleaner
@@ -65,8 +70,8 @@ class Cleaner
     dling = torrents.select { _1.progress < 1 }
     r = Resumes.new(torrents.size - dling.size > 0 ? 0 : 1)
     r.resume.concat (torrents - dling).select { _1.state == 'pausedUP' }
-    dling.sort_by { -_1.progress }.each do |t|
-      rem = t.size * (1 - t.progress)
+    dling.sort_by { _1.rem || 1.0/0 }.each do |t|
+      rem = t.rem || 0
       free -= rem
       if free < 0
         log[
@@ -106,7 +111,7 @@ class Cleaner
       then { |ts| ts.count { _1.progress >= 1 }.to_f / ts.size }) < 0.5
     then
       aggressive_delete = true
-      @log[seed_pct: Utils::Fmt.pct(seed_pct)].
+      @log[seed_pct: Utils::Fmt.pct(seed_pct, 1)].
         warn "few seeding torrents, deleting more aggressively"
     end
 
