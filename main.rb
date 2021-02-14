@@ -394,12 +394,10 @@ class SeedStats
   def initialize(t)
     @state = t.state
     @progress = t.progress
+    @availability = t.availability
     @ratio = [t.ratio, 0].max
-
-    now = Time.now
     @time_active = t.time_active
-    @seed_time = (now - Time.at(t.completion_on) if @progress >= 1)
-
+    @seed_time = (Time.now - Time.at(t.completion_on) if @progress >= 1)
     @health = Score.new compute_health_score
     compute_seeding_score(t.size).then do |score, seeding_info|
       @seeding = Score.new score
@@ -418,7 +416,9 @@ class SeedStats
     unless @progress < 1 && %w[stalledDL metaDL].include?(@state)
       return 1
     end
-    [2 - [@time_active - DL_GRACE, 0].max / DL_TIME_LIMIT + @progress, 0].max
+    score = 2 - [@time_active - DL_GRACE, 0].max.to_f / DL_TIME_LIMIT
+    score += @progress if @availability >= 1
+    [score , 0].max
   end
 
   MIN_SEED_RATIO = 5
