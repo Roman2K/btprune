@@ -54,7 +54,6 @@ class Cleaner
 
   private def prevent_quota_overage(torrents)
     log = @log["quota"]
-    torrents = torrents.select &:pvr
     free = MAX_QUOTA - torrents.sum { |t| t.size * t.progress }
     if free >= 0
       [:info, "remaining: %s of %s", free]
@@ -103,10 +102,10 @@ class Cleaner
     @log.info "used: %s of %s" \
       % [init_used, MAX_QUOTA].map { Utils::Fmt.size _1 }
 
-    if aggressive_delete =
-      (seed_pct = torrents.count { |t| t.pvr && t.progress >= 1 }.to_f.
-        div torrents.size) < 0.01
+    if (seed_pct = torrents.select { deleteable? _1 }.
+      then { |ts| ts.count { _1.progress >= 1 }.to_f / ts.size }) < 0.5
     then
+      aggressive_delete = true
       @log[seed_pct: Utils::Fmt.pct(seed_pct)].
         warn "few seeding torrents, deleting more aggressively"
     end
@@ -237,18 +236,22 @@ class Cleaner
     end
   end
 
-  def may_delete(t, st, should_free:, aggressive_delete:)
-    log = t.log[status: t.status]
-
+  private def deleteable?(t, log: Utils::Log::Noop.new)
     case t.status
     when :unknown_cat
-      log.error "unknown category"
-      return
+      log.error "not deleteable: unknown category"
+      false
     when :no_pvr
-      log.debug "no configured PVR"
-      return
+      log.debug "not deleteable: no configured PVR"
+      false
+    else
+      true
     end
+  end
 
+  def may_delete(t, st, should_free:, aggressive_delete:)
+    log = t.log[status: t.status]
+    deleteable? t, log: log or return
     log = log[progress: Fmt.progress(st.progress), ratio: Fmt.ratio(st.ratio)]
 
     dl_log = -> { log[
