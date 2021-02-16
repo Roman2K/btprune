@@ -33,7 +33,7 @@ class Torrent < BasicObject
   attr_accessor :log, :status, :pvr, :download_client_id
   def rem
     sz = @t.size
-    sz >= 0 or return
+    sz > 0 or return
     sz * (1 - @t.progress)
   end
 end
@@ -123,7 +123,7 @@ class Cleaner
       each { |t, st|
         ok = may_delete t, st,
           aggressive_delete: aggressive_delete,
-          should_free: is_over_max.()
+          should_free: is_over_max.() || torrents.any? { _1.progress < 1 }
         if (used = init_used - @freed) != prev_used
           @log.info "used after deletes: #{Utils::Fmt.size used}"
           prev_used = used
@@ -369,32 +369,6 @@ class Cleaner
   end
 end
 
-class Resumes
-  def initialize(min_dl)
-    @min_dl = min_dl
-    @pause, @resume = [], []
-  end
-
-  attr_reader :pause, :resume
-
-  STATE_STALLED = 'stalledDL'
-
-  def optimize!
-    @resume, @pause[0,@min_dl] = @pause[0,@min_dl], [] if @resume.empty?
-    backup = @pause.select { _1.state != STATE_STALLED }.shuffle
-    @resume.each_with_index do |t, idx|
-      if t.state == STATE_STALLED && o = backup.shift
-        @resume[idx] = o
-        @pause.delete(o) or raise
-        @pause << t
-      end
-    end
-    @resume.reject! &:downloading?
-    @pause.select! &:downloading?
-    self
-  end
-end
-
 class SeedStats
   def initialize(t)
     @state = t.state
@@ -415,13 +389,17 @@ class SeedStats
     :time_active, :seed_time, :health, :seeding, :seeding_info
 
   DL_TIME_LIMIT = 1 * 86400
+  META_DL_TIME_LIMIT = 2 * 3600
   DL_GRACE = 2 * 3600
+  STATE_META_DL = 'metaDL'
+  STALLED_STATES = [STATE_META_DL, 'stalledDL']
 
   private def compute_health_score
-    unless @progress < 1 && %w[stalledDL metaDL].include?(@state)
+    unless @progress < 1 && STALLED_STATES.include?(@state)
       return 1
     end
-    score = 2 - [@time_active - DL_GRACE, 0].max.to_f / DL_TIME_LIMIT
+    time_limit = @state == STATE_META_DL ? META_DL_TIME_LIMIT : DL_TIME_LIMIT
+    score = 2 - [@time_active - DL_GRACE, 0].max.to_f / time_limit
     score += @progress if @availability >= 1
     [score , 0].max
   end
@@ -448,6 +426,32 @@ class SeedStats
   Score = Struct.new :num do
     def to_f; num.to_f end
     def ok; num >= 1 end
+  end
+end
+
+class Resumes
+  def initialize(min_dl)
+    @min_dl = min_dl
+    @pause, @resume = [], []
+  end
+
+  attr_reader :pause, :resume
+
+  STALLED_STATES = SeedStats::STALLED_STATES
+
+  def optimize!
+    @resume, @pause[0,@min_dl] = @pause[0,@min_dl], [] if @resume.empty?
+    backup = @pause.reject { STALLED_STATES.include? _1.state }.shuffle
+    @resume.each_with_index do |t, idx|
+      if STALLED_STATES.include?(t.state) && o = backup.shift
+        @resume[idx] = o
+        @pause.delete(o) or raise
+        @pause << t
+      end
+    end
+    @resume.reject! &:downloading?
+    @pause.select! &:downloading?
+    self
   end
 end
 
