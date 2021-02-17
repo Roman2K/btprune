@@ -107,8 +107,10 @@ class Cleaner
     @log.info "used: %s of %s" \
       % [init_used, MAX_QUOTA].map { Utils::Fmt.size _1 }
 
-    if (seed_pct = torrents.select { deleteable? _1 }.
-      then { |ts| ts.count { _1.progress >= 1 }.to_f / ts.size }) < 0.5
+    torrents.select! { deleteable? _1 }
+
+    if (seed_pct = torrents.count { _1.progress >= 1 }.to_f / torrents.size) \
+      < 0.5
     then
       aggressive_delete = true
       @log[seed_pct: Utils::Fmt.pct(seed_pct, 1)].
@@ -142,7 +144,6 @@ class Cleaner
 
   private def force_imports(torrents)
     torrents = torrents.select { |t| t.progress >= 1 && t.status == :grabbed }
-    return if torrents.empty?
     running = Hash.new do |h, pvr|
       h[pvr] = pvr.commands.
         select { |c| c.fetch("name") == pvr.class::CMD_DOWNLOADED_SCAN }.
