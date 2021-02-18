@@ -55,7 +55,7 @@ class Cleaner
     @dry_run ? ret : yield
   end
 
-  MAX_QUOTA = 200 * (1024 ** 3)
+  MAX_QUOTA = 900 * (1024 ** 3)
 
   private def prevent_quota_overage(torrents)
     log = @log["quota"]
@@ -109,14 +109,6 @@ class Cleaner
 
     torrents.select! { deleteable? _1 }
 
-    if (seed_pct = torrents.count { _1.progress >= 1 }.to_f / torrents.size) \
-      < 0.5
-    then
-      aggressive_delete = true
-      @log[seed_pct: Utils::Fmt.pct(seed_pct, 1)].
-        warn "few seeding torrents, deleting more aggressively"
-    end
-
     prev_used = nil
     is_over_max = ->{ (init_used - @freed) >= MAX_QUOTA }
     torrents.
@@ -124,7 +116,6 @@ class Cleaner
       sort_by { |t, st| -st.ratio }.
       each { |t, st|
         ok = may_delete t, st,
-          aggressive_delete: aggressive_delete,
           should_free: is_over_max.() || torrents.any? { _1.progress < 1 }
         if (used = init_used - @freed) != prev_used
           @log.info "used after deletes: #{Utils::Fmt.size used}"
@@ -255,7 +246,7 @@ class Cleaner
     end
   end
 
-  def may_delete(t, st, should_free:, aggressive_delete:)
+  def may_delete(t, st, should_free:)
     log = t.log[status: t.status]
     deleteable? t, log: log or return
     log = log[progress: Fmt.progress(st.progress), ratio: Fmt.ratio(st.ratio)]
@@ -291,13 +282,8 @@ class Cleaner
     ]
 
     if !st.seeding.ok
-      seed_log = log[seeding_info: st.seeding_info]
-      if aggressive_delete && st.seeding_stalled?
-        seed_log.warn "seeding stalled"
-      else
-        seed_log.debug "still seeding"
-        return
-      end
+      log[seeding_info: st.seeding_info].debug "still seeding"
+      return
     end
 
     should_free or return
