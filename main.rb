@@ -364,7 +364,7 @@ class SeedStats
     @ratio = [t.ratio, 0].max
     @time_active = t.time_active
     @seed_time = (Time.now - Time.at(t.completion_on) if @progress >= 1)
-    @health = Score.new compute_health_score
+    @health = Score.new compute_health_score(t.size)
     compute_seeding_score(t.size).then do |score, seeding_info|
       @seeding = Score.new score
       @seeding_info = seeding_info
@@ -376,16 +376,18 @@ class SeedStats
     :time_active, :seed_time, :health, :seeding, :seeding_info
 
   DL_TIME_LIMIT = 1 * 86400
+  DL_TIME_BASE_SIZE = 6 * 1024**3
   META_DL_TIME_LIMIT = 2 * 3600
   DL_GRACE = 2 * 3600
   STATE_META_DL = 'metaDL'
   STALLED_STATES = [STATE_META_DL, 'stalledDL']
 
-  private def compute_health_score
+  private def compute_health_score(size)
     unless @progress < 1 && STALLED_STATES.include?(@state)
       return 1
     end
     time_limit = @state == STATE_META_DL ? META_DL_TIME_LIMIT : DL_TIME_LIMIT
+    time_limit *= size.to_f / DL_TIME_BASE_SIZE if size > 0 && @progress > 0
     score = 2 - [@time_active - DL_GRACE, 0].max.to_f / time_limit
     score += @progress if @availability >= 1
     [score , 0].max
@@ -397,7 +399,7 @@ class SeedStats
 
   private def compute_seeding_score(size)
     target = MIN_SEED_RATIO
-    target *= [MIN_SEED_MAX_SIZE.to_f / size, 1].min
+    target *= [MIN_SEED_MAX_SIZE.to_f / size, 1].min if size > 0
     target = 1 if target < 1
     scores = [@ratio.to_f / target]
     scores << (@seed_time.to_f / SEED_TIME_LIMIT) if @seed_time
