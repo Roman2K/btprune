@@ -14,8 +14,11 @@ class App
       "uncat_ok" => :imported,
       "" => nil,
     }
-    @pvrs.each do |pvr|
-      categories[pvr.name.downcase] = pvr
+    @pvrs.each do |name, pvr|
+      if categories.key? name
+        raise "category #{name.inspect} cannot be configured"
+      end
+      categories[name] = pvr
     end
 
     cleaner = Cleaner.new @client, categories, dry_run: @dry_run, log: @log
@@ -451,8 +454,10 @@ if $0 == __FILE__
   log.level = :debug if ENV["DEBUG"] == "1"
   dry_run = config[:dry_run]
   client = Utils::QBitTorrent.new URI(config[:qbt]), log: log["qbt"]
-  pvrs = config[:pvrs].to_hash.map do |name, url|
-    Utils::PVR.const_get(name).new(URI(url), batch_size: 100, log: log[name])
+  pvrs = config[:pvrs].each_with_object({}) do |(name, c), h|
+    h[name.to_s] = Utils::PVR.const_get(c[:type]).new URI(c[:url]),
+      batch_size: 100,
+      log: log[name]
   end
   app = App.new client, pvrs: pvrs, dry_run: dry_run, log: log
   MetaCLI.new(ARGV).run app
